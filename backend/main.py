@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
+from datetime import datetime
 import database
 import pyth_client
 import tracker_engine
@@ -73,6 +74,69 @@ async def get_positions():
             p['is_winning'] = (p['direction'] == 'UP' and current_price > ref) or (p['direction'] == 'DOWN' and current_price < ref)
             
     return positions
+
+class PositionCreate(BaseModel):
+    symbol: str
+    direction: str
+    bet_type: str
+
+@app.post("/api/positions")
+async def create_position(req: PositionCreate):
+    symbol_input = req.symbol.upper()
+    direction = req.direction.upper()
+    bet_type = req.bet_type.lower()
+    
+    # Resolve Pyth ID
+    pyth_id, full_symbol = pyth_client.get_pyth_id(symbol_input)
+    if not pyth_id:
+        raise HTTPException(status_code=400, detail=f"'{symbol_input}' Pyth sisteminde bulunamadı. Lütfen tam sembolü kontrol edin.")
+        
+    # Get reference price
+    if bet_type == 'close':
+        from_ts, to_ts = pyth_client.get_previous_close_times(symbol_input)
+        ref_price = await pyth_client.get_historical_candle_price(full_symbol, from_ts, to_ts, price_type='close')
+        time_desc = "Dünkü 15:59 ET Kapanış"
+    else:
+        from_ts, to_ts = pyth_client.get_previous_open_times(symbol_input)
+        ref_price = await pyth_client.get_historical_candle_price(full_symbol, from_ts, to_ts, price_type='open')
+        time_desc = "Bugünkü 09:30 ET Açılış"
+        
+    if ref_price is None:
+        raise HTTPException(status_code=400, detail=f"{full_symbol} için {time_desc} mumu Pyth'den çekilemedi! Piyasa kapalı olabilir veya henüz veri işlenmemiş olabilir.")
+        
+    # Get current price
+    current_price = await pyth_client.get_latest_price(pyth_id)
+    
+    # Save to database
+    now_str = datetime.now().isoformat()
+    db_direction = f"OPEN_{direction}" if bet_type == 'open' else direction
+    
+    await database.add_position(
+        symbol=symbol_input,
+        pyth_id=pyth_id,
+        direction=db_direction,
+        ref_price=ref_price,
+        ref_timestamp=to_ts,
+        created_at=now_str
+    )
+    
+    diff_pct = 0.0
+    if current_price:
+        diff_pct = ((current_price - ref_price) / ref_price) * 100
+        
+    status_icon = "✅" if (direction == 'UP' and current_price > ref_price) or (direction == 'DOWN' and current_price < ref_price) else "⚠️"
+    
+    msg = (
+        f"🎯 <b>Web'den Pozisyon Eklendi: {symbol_input} {db_direction}</b>\n\n"
+        f"<b>Referans ({time_desc}):</b> ${ref_price:.4f}\n"
+        f"<b>Anlık Fiyat:</b> ${current_price:.4f if current_price else 'Bilinmiyor'}\n"
+        f"<b>Fark:</b> %{diff_pct:.2f} {status_icon}"
+    )
+    
+    if tg_app:
+        await telegram_bot.send_notification(msg)
+        
+    return {"message": "Pozisyon eklendi."}
 
 @app.delete("/api/positions/{position_id}")
 async def delete_position(position_id: int):

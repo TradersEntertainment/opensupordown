@@ -24,6 +24,12 @@ function App() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [settings, setSettings] = useState<Settings>({ warning_zone_pct: 1.0, step_pct: 0.1 });
   const [loading, setLoading] = useState(true);
+  
+  // New Position State
+  const [newSymbol, setNewSymbol] = useState('');
+  const [newDirection, setNewDirection] = useState('UP');
+  const [newBetType, setNewBetType] = useState('close');
+  const [isAdding, setIsAdding] = useState(false);
 
   const fetchData = async () => {
     try {
@@ -57,6 +63,33 @@ function App() {
       alert("Ayarlar kaydedildi!");
     } catch (err) {
       alert("Hata oluştu.");
+    }
+  };
+
+  const handleAddPosition = async () => {
+    if (!newSymbol.trim()) return;
+    setIsAdding(true);
+    try {
+      const res = await fetch(`${API_BASE}/positions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: newSymbol.trim(),
+          direction: newDirection,
+          bet_type: newBetType
+        })
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Bir hata oluştu");
+      
+      setNewSymbol('');
+      fetchData();
+      alert("Pozisyon eklendi ve Telegram'a bildirildi!");
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsAdding(false);
     }
   };
 
@@ -149,10 +182,61 @@ function App() {
             )}
           </div>
 
-          {/* Sidebar: Settings */}
-          <div className="space-y-4">
-            <h2 className="text-xl font-semibold border-l-4 border-orange-500 pl-3">Telegram Uyarı Ayarları</h2>
-            <div className="bg-poly-card border border-poly-border rounded-lg p-5 space-y-6">
+          {/* Sidebar: Settings & Add Position */}
+          <div className="space-y-6">
+            
+            {/* Add Position Form */}
+            <div className="space-y-4">
+              <h2 className="text-xl font-semibold border-l-4 border-green-500 pl-3">Yeni Alarm Ekle</h2>
+              <div className="bg-poly-card border border-poly-border rounded-lg p-5 space-y-4">
+                <div>
+                  <label className="block text-sm text-poly-textMuted mb-1">Sembol (Örn: SPX, PLTR)</label>
+                  <input 
+                    type="text" 
+                    placeholder="SPX"
+                    value={newSymbol}
+                    onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
+                    className="w-full bg-poly-dark border border-poly-border rounded p-2 text-white font-mono focus:border-green-500 outline-none uppercase"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-sm text-poly-textMuted mb-1">Tür</label>
+                    <select 
+                      value={newBetType}
+                      onChange={(e) => setNewBetType(e.target.value)}
+                      className="w-full bg-poly-dark border border-poly-border rounded p-2 text-white focus:border-green-500 outline-none"
+                    >
+                      <option value="close">Günlük (Close)</option>
+                      <option value="open">Açılış (Open)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-poly-textMuted mb-1">Yön</label>
+                    <select 
+                      value={newDirection}
+                      onChange={(e) => setNewDirection(e.target.value)}
+                      className="w-full bg-poly-dark border border-poly-border rounded p-2 text-white focus:border-green-500 outline-none"
+                    >
+                      <option value="UP">Yukarı (UP)</option>
+                      <option value="DOWN">Aşağı (DOWN)</option>
+                    </select>
+                  </div>
+                </div>
+                <button 
+                  onClick={handleAddPosition}
+                  disabled={isAdding || !newSymbol.trim()}
+                  className="w-full bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-medium py-2 px-4 rounded transition-colors"
+                >
+                  {isAdding ? 'Ekleniyor...' : 'Alarm Ekle'}
+                </button>
+              </div>
+            </div>
+
+            {/* Settings */}
+            <div className="space-y-4">
+              <h2 className="text-xl font-semibold border-l-4 border-orange-500 pl-3">Telegram Uyarı Ayarları</h2>
+              <div className="bg-poly-card border border-poly-border rounded-lg p-5 space-y-6">
               
               <div>
                 <label className="block text-sm text-poly-textMuted mb-2">Tehlike Bölgesi (%)</label>
