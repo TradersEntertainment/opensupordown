@@ -11,20 +11,27 @@ logger = logging.getLogger(__name__)
 SLEEP_INTERVAL = 5  # seconds when market is open
 SLEEP_INTERVAL_CLOSED = 60  # seconds when market is closed (saves API calls)
 
-def is_market_open() -> bool:
+def is_market_completely_closed() -> bool:
     """
-    Returns True if at least one tracked market is likely open.
-    Stocks: 09:30-16:00 ET (Mon-Fri)
-    Commodities: 18:00 ET Sun - 17:00 ET Fri (essentially always open on weekdays)
-    We use a simple check: if it's a weekday and between 09:00-17:30 ET, consider open.
+    True only when ALL markets are fully closed.
+    - Weekdays before 09:00 ET (16:00 TR): pre-market not yet started
+    - Weekdays after 17:30 ET (00:30 TR): commodity market closed
+    - Saturday: all day
+    - Sunday before 18:00 ET (01:00 TR): commodity market closed
+    NOTE: 09:00 ET (16:00 TR) is intentionally included as active
+    so Opens Up/Down bets are tracked before market opens at 09:30 ET.
     """
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
-    if now_et.weekday() >= 5:  # Saturday or Sunday
-        return False
-    # 9:00 AM to 17:30 PM ET covers both stocks and commodities
+    weekday = now_et.weekday()  # 0=Mon, 6=Sun
     total_minutes = now_et.hour * 60 + now_et.minute
-    return (9 * 60) <= total_minutes <= (17 * 60 + 30)
+
+    if weekday == 5:  # Saturday: fully closed
+        return True
+    if weekday == 6:  # Sunday: closed until 18:00 ET
+        return total_minutes < (18 * 60)
+    # Weekdays: active 09:00 ET (pre-market) to 17:30 ET
+    return total_minutes < (9 * 60) or total_minutes > (17 * 60 + 30)
 
 async def _check_auto_expire(positions):
     """Closes positions if their market close time has passed."""
@@ -66,14 +73,13 @@ async def check_prices_loop():
 
     while True:
         try:
-            # If market is closed, sleep longer to save Railway compute & API quota
-            if not is_market_open():
-                await asyncio.sleep(SLEEP_INTERVAL_CLOSED)
-                continue
-
             positions = await database.get_active_positions()
+
+            # Cost optimization: sleep long ONLY when no active bets AND market is fully closed.
+            # If user has any active position, always poll at full speed (5s) regardless of time.
             if not positions:
-                await asyncio.sleep(SLEEP_INTERVAL)
+                sleep_time = SLEEP_INTERVAL_CLOSED if is_market_completely_closed() else SLEEP_INTERVAL
+                await asyncio.sleep(sleep_time)
                 continue
 
             await _check_auto_expire(positions)
