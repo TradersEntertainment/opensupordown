@@ -12,16 +12,38 @@ BENCHMARKS_URL = "https://benchmarks.pyth.network/v1"
 # Hardcoded symbol mapping for common assets to avoid needing a full cache initially
 # Users can add more via dashboard/telegram if needed
 SYMBOL_MAP = {
-    "SPX": "Equity.US.SPY/USD", # Per user instruction, use SPY for SPX
+    "SPX": "Equity.US.SPY/USD", 
     "SPY": "Equity.US.SPY/USD",
     "PLTR": "Equity.US.PLTR/USD",
     "AAPL": "Equity.US.AAPL/USD",
     "TSLA": "Equity.US.TSLA/USD",
-    "WTI": "Commodities.WTI/USD", # Generic WTI, might need specific contract logic later
+    "AMZN": "Equity.US.AMZN/USD",
+    "NVDA": "Equity.US.NVDA/USD",
+    "HOOD": "Equity.US.HOOD/USD",
+    "META": "Equity.US.META/USD",
+    "GOOGL": "Equity.US.GOOGL/USD",
+    "ABNB": "Equity.US.ABNB/USD",
+    "OPEN": "Equity.US.OPEN/USD",
+    "MSFT": "Equity.US.MSFT/USD",
+    "COIN": "Equity.US.COIN/USD",
+    "NFLX": "Equity.US.NFLX/USD",
+    "RKLB": "Equity.US.RKLB/USD",
+    "EWY": "Equity.US.EWY/USD",
+    "WTI": "Crypto.WTI/USD", # Pyth often lists commodities under Crypto or Metal
     "GOLD": "Metal.XAU/USD",
     "XAU": "Metal.XAU/USD",
+    "XAUUSD": "Metal.XAU/USD",
     "SILVER": "Metal.XAG/USD",
     "XAG": "Metal.XAG/USD",
+    "XAGUSD": "Metal.XAG/USD",
+    "NG": "Crypto.NG/USD",
+    "RUT": "Index.US.RUT/USD",
+    "HSI": "Index.HK.HSI/HKD",
+    "DIA": "Index.US.DJI/USD",
+    "DAX": "Index.EU.DAX/EUR",
+    "NKY": "Index.JP.NI225/JPY",
+    "UKX": "Index.GB.FTSE/GBP",
+    "NYA": "Index.US.NYA/USD",
     "BTC": "Crypto.BTC/USD"
 }
 

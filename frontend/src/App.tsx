@@ -20,6 +20,38 @@ interface Settings {
   step_pct: number;
 }
 
+const PREDEFINED_MARKETS = [
+  { name: 'S&P 500 (SPX) Up/Down', symbol: 'SPY', bet_type: 'close' },
+  { name: 'WTI Crude Oil (WTI) Up/Down', symbol: 'WTI', bet_type: 'close' },
+  { name: 'SPY (SPY) Up/Down', symbol: 'SPY', bet_type: 'close' },
+  { name: 'S&P 500 (SPX) Opens Up/Down', symbol: 'SPY', bet_type: 'open' },
+  { name: 'Gold (XAUUSD) Up/Down', symbol: 'XAU', bet_type: 'close' },
+  { name: 'Palantir (PLTR) Up/Down', symbol: 'PLTR', bet_type: 'close' },
+  { name: 'Amazon (AMZN) Up/Down', symbol: 'AMZN', bet_type: 'close' },
+  { name: 'NVIDIA (NVDA) Up/Down', symbol: 'NVDA', bet_type: 'close' },
+  { name: 'Robinhood (HOOD) Up/Down', symbol: 'HOOD', bet_type: 'close' },
+  { name: 'Apple (AAPL) Up/Down', symbol: 'AAPL', bet_type: 'close' },
+  { name: 'Meta (META) Up/Down', symbol: 'META', bet_type: 'close' },
+  { name: 'Google (GOOGL) Up/Down', symbol: 'GOOGL', bet_type: 'close' },
+  { name: 'Tesla (TSLA) Up/Down', symbol: 'TSLA', bet_type: 'close' },
+  { name: 'Natural Gas (NG) Up/Down', symbol: 'NG', bet_type: 'close' },
+  { name: 'Russell 2000 (RUT) Up/Down', symbol: 'RUT', bet_type: 'close' },
+  { name: 'Airbnb (ABNB) Up/Down', symbol: 'ABNB', bet_type: 'close' },
+  { name: 'Opendoor (OPEN) Up/Down', symbol: 'OPEN', bet_type: 'close' },
+  { name: 'Microsoft (MSFT) Up/Down', symbol: 'MSFT', bet_type: 'close' },
+  { name: 'Coinbase (COIN) Up/Down', symbol: 'COIN', bet_type: 'close' },
+  { name: 'EWY (EWY) Up/Down', symbol: 'EWY', bet_type: 'close' },
+  { name: 'Silver (XAGUSD) Up/Down', symbol: 'XAG', bet_type: 'close' },
+  { name: 'Netflix (NFLX) Up/Down', symbol: 'NFLX', bet_type: 'close' },
+  { name: 'Rocket Lab (RKLB) Up/Down', symbol: 'RKLB', bet_type: 'close' },
+  { name: 'Hang Seng (HSI) Up/Down', symbol: 'HSI', bet_type: 'close' },
+  { name: 'Dow Jones (DJIA) Up/Down', symbol: 'DIA', bet_type: 'close' },
+  { name: 'DAX (DAX) Up/Down', symbol: 'DAX', bet_type: 'close' },
+  { name: 'Nikkei 225 (NIK) Up/Down', symbol: 'NKY', bet_type: 'close' },
+  { name: 'FTSE 100 (UKX) Up/Down', symbol: 'UKX', bet_type: 'close' },
+  { name: 'NYA (NYA) Up/Down', symbol: 'NYA', bet_type: 'close' }
+];
+
 function App() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [settings, setSettings] = useState<Settings>({ warning_zone_pct: 1.0, step_pct: 0.1 });
@@ -86,6 +118,27 @@ function App() {
       setNewSymbol('');
       fetchData();
       alert("Pozisyon eklendi ve Telegram'a bildirildi!");
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsAdding(false);
+    }
+  };
+
+  const handleQuickAdd = async (symbol: string, direction: string, bet_type: string) => {
+    setIsAdding(true);
+    try {
+      const res = await fetch(`${API_BASE}/positions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, direction, bet_type })
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Bir hata oluştu");
+      
+      fetchData();
+      alert(`${symbol} ${direction} pozisyonu eklendi ve Telegram'a bildirildi!`);
     } catch (err: any) {
       alert(err.message);
     } finally {
@@ -180,6 +233,41 @@ function App() {
                 ))}
               </div>
             )}
+
+            {/* Quick Markets Section */}
+            <div className="mt-12 pt-8 border-t border-poly-border">
+              <h2 className="text-xl font-semibold border-l-4 border-blue-400 pl-3 mb-6">Polymarket Hızlı Ekleme</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {PREDEFINED_MARKETS.map((market, idx) => (
+                  <div key={idx} className="bg-poly-card border border-poly-border rounded-lg p-4 hover:border-gray-500 transition-colors">
+                    <div className="flex items-start gap-3 mb-4">
+                      {/* Placeholder icon */}
+                      <div className="w-8 h-8 rounded-full bg-gray-800 flex items-center justify-center text-xs font-bold shrink-0">
+                        {market.symbol.substring(0, 2)}
+                      </div>
+                      <h3 className="font-semibold text-sm leading-tight text-white">{market.name}</h3>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-2 mt-auto">
+                      <button 
+                        onClick={() => handleQuickAdd(market.symbol, 'UP', market.bet_type)}
+                        disabled={isAdding}
+                        className="py-2 rounded bg-poly-up/10 text-poly-up border border-poly-up/20 hover:bg-poly-up hover:text-white transition-colors text-sm font-semibold disabled:opacity-50"
+                      >
+                        Up
+                      </button>
+                      <button 
+                        onClick={() => handleQuickAdd(market.symbol, 'DOWN', market.bet_type)}
+                        disabled={isAdding}
+                        className="py-2 rounded bg-poly-down/10 text-poly-down border border-poly-down/20 hover:bg-poly-down hover:text-white transition-colors text-sm font-semibold disabled:opacity-50"
+                      >
+                        Down
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           {/* Sidebar: Settings & Add Position */}
