@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
-// API base URL - adjust for production
-const API_BASE = 'http://localhost:8000/api';
+// API base URL - read from environment or fallback to localhost
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
 interface Position {
   id: number;
