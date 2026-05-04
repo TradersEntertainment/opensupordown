@@ -30,12 +30,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Poly Up/Down Tracker'a Hoş Geldiniz!</b>\n\n"
         "Komutlar:\n"
         "<b>Günlük Bahisler (Dünkü Kapanışa Göre):</b>\n"
-        "<code>/up SEMBOL</code> - 'Up' pozisyonu ekle (örn: /up PLTR)\n"
-        "<code>/down SEMBOL</code> - 'Down' pozisyonu ekle (örn: /down WTI)\n\n"
+        "<code>/up SEMBOL</code> - örn: /up PLTR\n"
+        "<code>/down SEMBOL</code> - örn: /down WTI\n\n"
         "<b>Açılış Bahisleri (Bugünkü Açılışa Göre):</b>\n"
-        "<code>/open_up SEMBOL</code> - 'Opens Up' pozisyonu ekle\n"
-        "<code>/open_down SEMBOL</code> - 'Opens Down' pozisyonu ekle\n\n"
-        "<code>/status</code> - Aktif pozisyonların durumunu gör\n"
+        "<code>/open_up SEMBOL</code> - Opens Up pozisyonu\n"
+        "<code>/open_down SEMBOL</code> - Opens Down pozisyonu\n\n"
+        "<b>Yönetim:</b>\n"
+        "<code>/status</code> - Tüm aktif pozisyonları listele\n"
+        "<code>/remove</code> - Pozisyon sil (liste gelir, numarasını yaz)"
     )
     await update.message.reply_html(msg)
 
@@ -137,18 +139,42 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_html("\n".join(lines))
 
+async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    positions = await database.get_active_positions()
+    if not positions:
+        await update.message.reply_text("Silinecek aktif pozisyon yok.")
+        return
+
+    if context.args:
+        try:
+            pos_id = int(context.args[0])
+            await database.delete_position(pos_id)
+            await update.message.reply_text(f"✅ #{pos_id} numaralı pozisyon silindi.")
+            return
+        except (ValueError, Exception) as e:
+            await update.message.reply_text(f"Hata: {e}")
+            return
+
+    # List positions to choose from
+    lines = ["🗑️ <b>Hangi pozisyonu silmek istiyorsunuz?</b>\n"]
+    lines.append("<code>/remove [ID]</code> yazarak silebilirsiniz:\n")
+    for p in positions:
+        lines.append(f"• <code>/remove {p['id']}</code> → {p['symbol']} {p['direction']} (Ref: ${p['ref_price']:.4f})")
+    await update.message.reply_html("\n".join(lines))
+
 def setup_application() -> Application:
     if not TELEGRAM_TOKEN:
         logger.warning("TELEGRAM_TOKEN not set. Polling won't start.")
         return None
-        
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
+
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("up", up_command))
     app.add_handler(CommandHandler("down", down_command))
     app.add_handler(CommandHandler("open_up", open_up_command))
     app.add_handler(CommandHandler("open_down", open_down_command))
     app.add_handler(CommandHandler("status", status_command))
-    
+    app.add_handler(CommandHandler("remove", remove_command))
+
     return app

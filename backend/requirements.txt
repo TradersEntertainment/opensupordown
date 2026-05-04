@@ -1,8 +1,8 @@
+pytz
 fastapi
-uvicorn
+uvicorn[standard]
 httpx
 aiosqlite
-python-telegram-bot
+python-telegram-bot==21.6
 pydantic
-starlette
 python-dotenv
