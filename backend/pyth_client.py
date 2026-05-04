@@ -153,9 +153,10 @@ def get_previous_open_times(symbol: str) -> tuple[int, int]:
     
     return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())
 
-async def get_historical_candle_price(full_symbol: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
+async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
     """
     Fetches the exact 'Close' or 'Open' price of the 1-minute candle from Pyth's TV history API.
+    Falls back to Hermes historical API if TV shim fails.
     """
     url = f"{BENCHMARKS_URL}/shims/tradingview/history"
     params = {
@@ -175,10 +176,28 @@ async def get_historical_candle_price(full_symbol: str, from_ts: int, to_ts: int
             target_key = "c" if price_type == 'close' else "o"
             
             if data.get("s") == "ok" and target_key in data and len(data[target_key]) > 0:
-                price = data[target_key][0]
+                price = data[target_key][-1] if price_type == 'close' else data[target_key][0]
                 return float(price)
             else:
-                logger.error(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Response: {data}")
+                logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Response: {data.get('s')}. Falling back to Hermes history API...")
+                clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
+                # If we want close, we want the price at the end of the minute (to_ts)
+                # If we want open, we want the price at the start of the minute (from_ts)
+                target_ts = to_ts if price_type == 'close' else from_ts
+                fallback_url = f"{HERMES_URL}/updates/price/{target_ts}"
+                fb_params = {"ids[]": clean_id, "parsed": "true"}
+                fb_resp = await client.get(fallback_url, params=fb_params, timeout=5.0)
+                if fb_resp.status_code == 200:
+                    fb_data = fb_resp.json()
+                    for item in fb_data.get("parsed", []):
+                        if clean_id in item.get("id", ""):
+                            price_info = item.get("price", {})
+                            p_str = price_info.get("price")
+                            e_str = price_info.get("expo")
+                            if p_str and e_str:
+                                return float(p_str) * (10 ** int(e_str))
+                                
+                logger.error(f"Fallback to Hermes History failed for {full_symbol} at {target_ts}")
                 return None
                 
     except Exception as e:

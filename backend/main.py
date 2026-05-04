@@ -94,11 +94,11 @@ async def create_position(req: PositionCreate):
     # Get reference price
     if bet_type == 'close':
         from_ts, to_ts = pyth_client.get_previous_close_times(symbol_input)
-        ref_price = await pyth_client.get_historical_candle_price(full_symbol, from_ts, to_ts, price_type='close')
+        ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='close')
         time_desc = "Dünkü 15:59 ET Kapanış"
     else:
         from_ts, to_ts = pyth_client.get_previous_open_times(symbol_input)
-        ref_price = await pyth_client.get_historical_candle_price(full_symbol, from_ts, to_ts, price_type='open')
+        ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='open')
         time_desc = "Bugünkü 09:30 ET Açılış"
         
     if ref_price is None:
