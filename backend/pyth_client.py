@@ -104,8 +104,8 @@ def get_previous_close_times(symbol: str) -> tuple[int, int]:
     while target_date.weekday() >= 5:
         target_date -= timedelta(days=1)
         
-    # We want the 1-minute candle BEFORE the close_hour. 
-    # e.g., if close is 16:00, we want the 15:59:00 to 16:00:00 candle.
+    # We want ONLY the 15:59 (or 16:59) candle.
+    # Using 15:59:00 to 15:59:59 ensures Pyth returns exactly 1 candle.
     candle_start_dt = et_tz.localize(datetime(
         target_date.year, 
         target_date.month, 
@@ -117,7 +117,7 @@ def get_previous_close_times(symbol: str) -> tuple[int, int]:
         target_date.year, 
         target_date.month, 
         target_date.day, 
-        close_hour, 0, 0
+        close_hour - 1, 59, 59
     ))
     
     return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())
@@ -148,7 +148,7 @@ def get_previous_open_times(symbol: str) -> tuple[int, int]:
         target_date.year, 
         target_date.month, 
         target_date.day, 
-        9, 31, 0
+        9, 30, 59
     ))
     
     return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())

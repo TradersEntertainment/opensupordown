@@ -60,11 +60,11 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE, di
     # Get reference price (yesterday's close OR today's open)
     if bet_type == 'close':
         from_ts, to_ts = pyth_client.get_previous_close_times(symbol_input)
-        ref_price = await pyth_client.get_historical_candle_price(full_symbol, from_ts, to_ts, price_type='close')
+        ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='close')
         time_desc = "Dünkü 15:59 ET Kapanış"
     else:
         from_ts, to_ts = pyth_client.get_previous_open_times(symbol_input)
-        ref_price = await pyth_client.get_historical_candle_price(full_symbol, from_ts, to_ts, price_type='open')
+        ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='open')
         time_desc = "Bugünkü 09:30 ET Açılış"
         
     if ref_price is None:
@@ -93,11 +93,12 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE, di
         
     status_icon = "✅" if (direction == 'UP' and current_price > ref_price) or (direction == 'DOWN' and current_price < ref_price) else "⚠️"
     
+    current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
     msg = (
         f"🎯 <b>Pozisyon Eklendi: {symbol_input} {db_direction}</b>\n\n"
-        f"<b>Referans ({time_desc}):</b> ${ref_price:.4f}\n"
-        f"<b>Anlık Fiyat:</b> ${current_price:.4f if current_price else 'Bilinmiyor'}\n"
-        f"<b>Fark:</b> %{diff_pct:.2f} {status_icon}\n\n"
+        f"<b>Anlık Fiyat:</b> {current_price_str}\n"
+        f"<b>Fark:</b> %{diff_pct:.2f} {status_icon}\n"
+        f"<b>Referans ({time_desc}):</b> ${ref_price:.4f}\n\n"
         f"<i>Kapanışa yaklaştığında ayarlanan yüzdelere göre uyarılacaksınız.</i>"
     )
     await update.message.reply_html(msg)
