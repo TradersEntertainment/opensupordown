@@ -153,6 +153,17 @@ async def sync_positions_loop():
     
     while True:
         try:
+            # Don't sync after market close — no point adding positions that expire immediately
+            et_tz = pytz.timezone('US/Eastern')
+            now_et = datetime.now(et_tz)
+            total_minutes = now_et.hour * 60 + now_et.minute
+            is_weekend = now_et.weekday() >= 5
+            # Stock market: 09:30-16:00 ET, but allow from 09:00 for pre-market
+            # Don't sync after 16:00 ET (23:00 TR) for stocks
+            if is_weekend or total_minutes >= 960 or total_minutes < 540:  # 960=16:00, 540=09:00
+                await asyncio.sleep(CHECK_INTERVAL)
+                continue
+            
             positions = await fetch_wallet_positions()
             if not positions:
                 await asyncio.sleep(CHECK_INTERVAL)
