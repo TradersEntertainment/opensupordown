@@ -120,9 +120,9 @@ async def check_prices_loop():
                         msg = (
                             f"{urgency} <b>TEHLİKE: {p['symbol']} {direction}</b>\n\n"
                             f"<b>Durum:</b> {status_word}\n"
-                            f"<b>Referans:</b> ${ref:.4f}\n"
                             f"<b>Anlık:</b> ${current_price:.4f}\n"
-                            f"<b>Fark:</b> %{abs_diff_pct:.3f}"
+                            f"<b>Fark:</b> %{abs_diff_pct:.3f}\n"
+                            f"<b>Referans:</b> ${ref:.4f}"
                         )
                         await send_notification(msg)
                 else:
