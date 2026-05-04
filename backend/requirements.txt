@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx
+aiosqlite
+python-telegram-bot
+pydantic
+starlette
+python-dotenv
