@@ -126,10 +126,11 @@ async def create_position(req: PositionCreate):
         
     status_icon = "✅" if (direction == 'UP' and current_price > ref_price) or (direction == 'DOWN' and current_price < ref_price) else "⚠️"
     
+    current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
     msg = (
         f"🎯 <b>Web'den Pozisyon Eklendi: {symbol_input} {db_direction}</b>\n\n"
         f"<b>Referans ({time_desc}):</b> ${ref_price:.4f}\n"
-        f"<b>Anlık Fiyat:</b> ${current_price:.4f if current_price else 'Bilinmiyor'}\n"
+        f"<b>Anlık Fiyat:</b> {current_price_str}\n"
         f"<b>Fark:</b> %{diff_pct:.2f} {status_icon}"
     )
     
