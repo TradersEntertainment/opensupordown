@@ -18,16 +18,27 @@ _last_premarket_price = None
 # --- Closing Summary State ---
 _last_summary_time = 0
 
+# --- Pre-market Movers Scanner State ---
+_last_scanner_time = 0
+_scanner_alerted = set()  # Set of symbols already alerted today
+PREMARKET_ALERT_THRESHOLD = 2.0  # Alert at 2%+ move
+PREMARKET_SCAN_INTERVAL = 180  # Check every 3 minutes
+
+# Stocks to scan in pre-market (ones that have Polymarket Up/Down bets)
+PREMARKET_WATCHLIST = [
+    "SPY", "PLTR", "TSLA", "NVDA", "AAPL", "AMZN", "META", "GOOGL",
+    "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY"
+]
+
 
 def is_market_completely_closed() -> bool:
     """
     True only when ALL markets are fully closed.
-    - Weekdays before 09:00 ET (16:00 TR): pre-market not yet started
+    - Weekdays before 04:00 ET (11:00 TR): pre-market not yet started
     - Weekdays after 17:30 ET (00:30 TR): commodity market closed
     - Saturday: all day
     - Sunday before 18:00 ET (01:00 TR): commodity market closed
-    NOTE: 09:00 ET (16:00 TR) is intentionally included as active
-    so Opens Up/Down bets are tracked before market opens at 09:30 ET.
+    NOTE: 04:00 ET is used so premarket movers scanner can run.
     """
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
@@ -38,8 +49,8 @@ def is_market_completely_closed() -> bool:
         return True
     if weekday == 6:  # Sunday: closed until 18:00 ET
         return total_minutes < (18 * 60)
-    # Weekdays: active 09:00 ET (pre-market) to 17:30 ET
-    return total_minutes < (9 * 60) or total_minutes > (17 * 60 + 30)
+    # Weekdays: active 04:00 ET (pre-market scanner) to 17:30 ET
+    return total_minutes < (4 * 60) or total_minutes > (17 * 60 + 30)
 
 
 async def _check_auto_expire(positions):
@@ -209,6 +220,105 @@ async def _check_premarket_opens():
     await send_notification(msg)
 
 
+async def _check_premarket_movers():
+    """
+    Pre-market movers scanner.
+    Active between 04:00-09:30 ET (11:00-16:30 TR) on weekdays.
+    Scans all watchlist stocks and alerts when any moves 2%+ vs yesterday's close.
+    Uses .PRE Pyth feeds where available, falls back to regular feeds.
+    """
+    global _last_scanner_time, _scanner_alerted
+    import time
+    
+    et_tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et_tz)
+    total_minutes = now_et.hour * 60 + now_et.minute
+    
+    # Only active 04:00-09:30 ET on weekdays
+    if now_et.weekday() >= 5:
+        return
+    if not (240 <= total_minutes < 570):  # 04:00=240, 09:30=570
+        # Reset alerts at end of day
+        if _scanner_alerted:
+            _scanner_alerted = set()
+        return
+    
+    now_ts = time.time()
+    if now_ts - _last_scanner_time < PREMARKET_SCAN_INTERVAL:
+        return
+    _last_scanner_time = now_ts
+    
+    movers = []
+    
+    for symbol in PREMARKET_WATCHLIST:
+        try:
+            # Try .PRE feed first, fallback to regular
+            pre_symbol = f"Equity.US.{symbol}/USD.PRE"
+            regular_symbol = f"Equity.US.{symbol}/USD"
+            
+            # Check if PRE feed exists in cache
+            pre_id = pyth_client.pyth_id_cache.get(pre_symbol)
+            regular_id = pyth_client.pyth_id_cache.get(regular_symbol)
+            
+            # Get current premarket price
+            current_price = None
+            if pre_id:
+                current_price = await pyth_client.get_latest_price(pre_id)
+            if not current_price and regular_id:
+                current_price = await pyth_client.get_latest_price(regular_id)
+            
+            if not current_price:
+                continue
+            
+            # Get yesterday's close
+            pyth_id_for_history = regular_id or pre_id
+            from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+            ref_price = await pyth_client.get_historical_candle_price(
+                regular_symbol, pyth_id_for_history, from_ts, to_ts, price_type='close'
+            )
+            
+            if not ref_price:
+                continue
+            
+            diff_pct = ((current_price - ref_price) / ref_price) * 100
+            
+            if abs(diff_pct) >= PREMARKET_ALERT_THRESHOLD:
+                movers.append((symbol, current_price, ref_price, diff_pct))
+                
+        except Exception as e:
+            logger.error(f"Error scanning {symbol} premarket: {e}")
+            continue
+    
+    if not movers:
+        return
+    
+    # Filter out already-alerted symbols (only alert once per day per symbol)
+    new_movers = [(s, cp, rp, dp) for s, cp, rp, dp in movers if s not in _scanner_alerted]
+    
+    if not new_movers:
+        return
+    
+    # Mark as alerted
+    for s, _, _, _ in new_movers:
+        _scanner_alerted.add(s)
+    
+    # Build message
+    lines = ["🚀 <b>PREMARKET HAREKET TESPİT EDİLDİ!</b>\n"]
+    minutes_to_open = max(0, 570 - total_minutes)
+    
+    for symbol, cp, rp, dp in sorted(new_movers, key=lambda x: abs(x[3]), reverse=True):
+        direction = "📈" if dp > 0 else "📉"
+        lines.append(
+            f"{direction} <b>{symbol}</b>: ${cp:.2f} ({dp:+.2f}%)\n"
+            f"   Dünkü Kapanış: ${rp:.2f}"
+        )
+    
+    lines.append(f"\n⏰ Açılışa {minutes_to_open} dakika")
+    lines.append("\n<i>💡 Polymarket'te Up pozisyonu almak için iyi fırsat olabilir!</i>")
+    
+    await send_notification("\n".join(lines))
+
+
 async def check_prices_loop():
     logger.info("Starting Up/Down Tracker Engine...")
     await send_notification(
@@ -220,6 +330,9 @@ async def check_prices_loop():
         try:
             # Always check pre-market opens (runs only in the right time window)
             await _check_premarket_opens()
+            
+            # Scan for premarket movers (2%+ moves)
+            await _check_premarket_movers()
             
             positions = await database.get_active_positions()
 
