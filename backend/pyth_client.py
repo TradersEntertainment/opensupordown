@@ -229,3 +229,29 @@ async def get_latest_price(pyth_id: str) -> float:
     except Exception as e:
         logger.error(f"Error fetching latest price: {e}")
         return None
+async def get_active_price(symbol: str, default_pyth_id: str) -> float:
+    """
+    Smart price fetcher that prefers .PRE feeds for stocks during pre-market hours.
+    ET 04:00-09:30 (TR 11:00-16:30)
+    """
+    et_tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et_tz)
+    total_minutes = now_et.hour * 60 + now_et.minute
+    is_premarket = 240 <= total_minutes < 570
+    
+    symbol_up = symbol.upper()
+    is_commodity = any(c in symbol_up for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER", "NG"])
+    
+    if is_premarket and not is_commodity:
+        # Try to find a .PRE feed for this stock
+        regular_pyth_symbol = SYMBOL_MAP.get(symbol_up, f"Equity.US.{symbol_up}/USD")
+        if regular_pyth_symbol.startswith("Equity.US."):
+            pre_symbol = f"{regular_pyth_symbol}.PRE"
+            pre_id = pyth_id_cache.get(pre_symbol)
+            if pre_id:
+                price = await get_latest_price(pre_id)
+                if price:
+                    return price
+                    
+    # Fallback to default ID
+    return await get_latest_price(default_pyth_id)

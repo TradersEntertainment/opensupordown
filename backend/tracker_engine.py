@@ -124,7 +124,7 @@ async def _send_closing_summary(positions):
     minutes_to_close_commodity = max(0, 1020 - total_minutes)
     
     for p in positions:
-        current_price = await pyth_client.get_latest_price(p['pyth_id'])
+        current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
         if not current_price:
             continue
         
@@ -168,18 +168,18 @@ async def _check_premarket_opens():
         return
     
     # Resolve SPY
-    pyth_id, full_symbol = pyth_client.get_pyth_id("SPY")
-    if not pyth_id:
+    regular_id, _ = pyth_client.get_pyth_id("SPY")
+    if not regular_id:
         return
-    
-    current_price = await pyth_client.get_latest_price(pyth_id)
+        
+    current_price = await pyth_client.get_active_price("SPY", regular_id)
     if not current_price:
         return
     
-    # Get yesterday's close as reference
+    # Get yesterday's close as reference (always from regular feed for history)
     from_ts, to_ts = pyth_client.get_previous_close_times("SPY")
     ref_price = await pyth_client.get_historical_candle_price(
-        full_symbol, pyth_id, from_ts, to_ts, price_type='close'
+        "Equity.US.SPY/USD", regular_id, from_ts, to_ts, price_type='close'
     )
     if not ref_price:
         return
@@ -358,7 +358,7 @@ async def check_prices_loop():
             step_pct = settings['step_pct']
 
             for p in positions:
-                current_price = await pyth_client.get_latest_price(p['pyth_id'])
+                current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
                 if not current_price:
                     continue
 

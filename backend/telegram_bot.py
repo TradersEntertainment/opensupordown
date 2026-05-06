@@ -72,7 +72,7 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE, di
         return
         
     # Get current price
-    current_price = await pyth_client.get_latest_price(pyth_id)
+    current_price = await pyth_client.get_active_price(symbol_input, pyth_id)
     
     # Save to database
     now_str = datetime.now().isoformat()

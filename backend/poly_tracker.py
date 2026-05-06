@@ -125,7 +125,7 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
     )
     
     # Get current price for notification
-    current_price = await pyth_client.get_latest_price(pyth_id)
+    current_price = await pyth_client.get_active_price(symbol, pyth_id)
     diff_pct = 0.0
     if current_price:
         diff_pct = ((current_price - ref_price) / ref_price) * 100

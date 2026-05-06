@@ -69,7 +69,7 @@ async def get_positions():
     
     # Inject current prices for the dashboard
     for p in positions:
-        current_price = await pyth_client.get_latest_price(p['pyth_id'])
+        current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
         p['current_price'] = current_price
         
         if current_price:
@@ -109,7 +109,7 @@ async def create_position(req: PositionCreate):
         raise HTTPException(status_code=400, detail=f"{full_symbol} için {time_desc} mumu Pyth'den çekilemedi! Piyasa kapalı olabilir veya henüz veri işlenmemiş olabilir.")
         
     # Get current price
-    current_price = await pyth_client.get_latest_price(pyth_id)
+    current_price = await pyth_client.get_active_price(symbol_input, pyth_id)
     
     # Save to database
     now_str = datetime.now().isoformat()
