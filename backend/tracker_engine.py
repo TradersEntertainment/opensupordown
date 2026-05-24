@@ -161,10 +161,10 @@ async def _check_premarket_opens():
     now_et = datetime.now(et_tz)
     total_minutes = now_et.hour * 60 + now_et.minute
     
-    # Only active 09:15-09:30 ET on weekdays
+    # Only active 09:15-09:29 ET on weekdays (cut off before 09:29 ET / 16:29 TR to prevent notifications at open)
     if now_et.weekday() >= 5:
         return
-    if not (555 <= total_minutes < 570):  # 09:15 = 555, 09:30 = 570
+    if not (555 <= total_minutes < 569):  # 09:15 = 555, 09:29 = 569
         return
     
     # Resolve SPY
