@@ -30,6 +30,15 @@ PREMARKET_WATCHLIST = [
     "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY"
 ]
 
+# --- Market Open Result State ---
+_open_result_sent_today = None
+
+# --- Direction Flip Detection State ---
+_position_flip_state = {}
+FLIP_STABLE_MINUTES = 3    # Direction must be stable for at least 3 min
+FLIP_MIN_PCT = 0.1          # Minimum 0.1% in new direction to trigger
+FLIP_COOLDOWN = 300         # 5 min cooldown between alerts per position
+
 
 def is_market_completely_closed() -> bool:
     """
@@ -119,10 +128,11 @@ async def _send_closing_summary(positions):
     
     _last_summary_time = now_ts
     
-    lines = [f"📊 <b>Kapanış Yaklaşıyor — Durum Özeti</b>\n"]
     minutes_to_close_stock = max(0, 960 - total_minutes)
     minutes_to_close_commodity = max(0, 1020 - total_minutes)
     
+    # Collect position data first so we can sort by danger level
+    pos_data = []
     for p in positions:
         current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
         if not current_price:
@@ -132,19 +142,36 @@ async def _send_closing_summary(positions):
         diff_pct = ((current_price - ref) / ref) * 100
         is_up_bet = 'UP' in p['direction']
         is_winning = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
-        icon = "🟢" if is_winning else "🔴"
         
         symbol = p['symbol']
         is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
         mins_left = minutes_to_close_commodity if is_commodity else minutes_to_close_stock
         
+        pos_data.append({
+            'symbol': symbol,
+            'direction': p['direction'],
+            'current_price': current_price,
+            'diff_pct': diff_pct,
+            'is_winning': is_winning,
+            'mins_left': mins_left,
+            'abs_diff': abs(diff_pct)
+        })
+    
+    if not pos_data:
+        return
+    
+    # Sort by danger: losing positions first, then by smallest abs diff (closest to flipping)
+    pos_data.sort(key=lambda x: (x['is_winning'], x['abs_diff']))
+    
+    lines = [f"📊 <b>Kapanış Yaklaşıyor — Durum Özeti</b>\n"]
+    for d in pos_data:
+        icon = "🟢" if d['is_winning'] else "🔴"
         lines.append(
-            f"{icon} <b>{symbol} {p['direction']}</b>\n"
-            f"   Anlık: ${current_price:.4f} | Fark: %{diff_pct:.2f} | Kapanışa: {mins_left}dk"
+            f"{icon} <b>{d['symbol']} {d['direction']}</b>\n"
+            f"   Anlık: ${d['current_price']:.4f} | Fark: %{d['diff_pct']:.2f} | Kapanışa: {d['mins_left']}dk"
         )
     
-    if len(lines) > 1:
-        await send_notification("\n".join(lines))
+    await send_notification("\n".join(lines))
 
 
 async def _check_premarket_opens():
@@ -218,6 +245,152 @@ async def _check_premarket_opens():
         f"<b>Açılışa:</b> {minutes_to_open} dakika"
     )
     await send_notification(msg)
+
+
+async def _check_market_open_result():
+    """
+    At exactly 09:30 ET (16:30 TR), send a one-time notification
+    about whether SPX opened UP or DOWN.
+    """
+    global _open_result_sent_today
+    
+    et_tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et_tz)
+    total_minutes = now_et.hour * 60 + now_et.minute
+    
+    # Only at 09:30-09:32 ET on weekdays (2-min window to catch it)
+    if now_et.weekday() >= 5:
+        return
+    if not (570 <= total_minutes < 572):  # 09:30 = 570, 09:32 = 572
+        return
+    
+    today_str = now_et.strftime('%Y-%m-%d')
+    if _open_result_sent_today == today_str:
+        return  # Already sent today
+    
+    # Get SPY current price
+    regular_id, _ = pyth_client.get_pyth_id("SPY")
+    if not regular_id:
+        return
+    
+    current_price = await pyth_client.get_active_price("SPY", regular_id)
+    if not current_price:
+        return
+    
+    # Get yesterday's close as reference
+    from_ts, to_ts = pyth_client.get_previous_close_times("SPY")
+    ref_price = await pyth_client.get_historical_candle_price(
+        "Equity.US.SPY/USD", regular_id, from_ts, to_ts, price_type='close'
+    )
+    if not ref_price:
+        return
+    
+    diff_pct = ((current_price - ref_price) / ref_price) * 100
+    
+    if diff_pct > 0:
+        result = "YUKARI AÇILDI 📈🟢"
+    else:
+        result = "AŞAĞI AÇILDI 📉🔴"
+    
+    _open_result_sent_today = today_str
+    
+    msg = (
+        f"🔔 <b>SPX {result}</b>\n\n"
+        f"<b>Açılış Fiyatı:</b> ${current_price:.4f}\n"
+        f"<b>Fark:</b> %{diff_pct:+.3f}\n"
+        f"<b>Dünkü Kapanış:</b> ${ref_price:.4f}"
+    )
+    await send_notification(msg)
+
+
+async def _check_direction_flip(p, current_price):
+    """
+    Detect rapid direction changes for a position.
+    If price was stably UP (or DOWN) vs reference for 3+ minutes
+    and then flips to the other direction by at least 0.1%, alert.
+    """
+    global _position_flip_state
+    import time
+    
+    if not current_price:
+        return
+    
+    pos_id = p['id']
+    ref = p['ref_price']
+    diff_pct = ((current_price - ref) / ref) * 100
+    now_ts = time.time()
+    
+    # Determine current direction relative to ref
+    current_dir = 'UP' if diff_pct > 0 else 'DOWN'
+    
+    if pos_id not in _position_flip_state:
+        _position_flip_state[pos_id] = {
+            'direction': current_dir,
+            'since': now_ts,
+            'last_alert': 0,
+            'peak_pct': diff_pct
+        }
+        return
+    
+    state = _position_flip_state[pos_id]
+    
+    # Same direction: just track the peak
+    if current_dir == state['direction']:
+        if current_dir == 'UP' and diff_pct > state.get('peak_pct', 0):
+            state['peak_pct'] = diff_pct
+        elif current_dir == 'DOWN' and diff_pct < state.get('peak_pct', 0):
+            state['peak_pct'] = diff_pct
+        return
+    
+    # Direction changed!
+    prev_dir = state['direction']
+    stable_duration = (now_ts - state['since']) / 60  # minutes
+    
+    # Previous direction must have been stable for at least FLIP_STABLE_MINUTES
+    if stable_duration < FLIP_STABLE_MINUTES:
+        state['direction'] = current_dir
+        state['since'] = now_ts
+        state['peak_pct'] = diff_pct
+        return
+    
+    # Previous peak must have been meaningful (at least FLIP_MIN_PCT)
+    if abs(state.get('peak_pct', 0)) < FLIP_MIN_PCT:
+        state['direction'] = current_dir
+        state['since'] = now_ts
+        state['peak_pct'] = diff_pct
+        return
+    
+    # New direction must be at least FLIP_MIN_PCT
+    if abs(diff_pct) < FLIP_MIN_PCT:
+        return  # Don't update state yet — wait for it to commit or bounce back
+    
+    # Cooldown check
+    if now_ts - state['last_alert'] < FLIP_COOLDOWN:
+        state['direction'] = current_dir
+        state['since'] = now_ts
+        state['peak_pct'] = diff_pct
+        return
+    
+    # SEND ALERT!
+    swing_pct = abs(diff_pct - state.get('peak_pct', 0))
+    flip_emoji = "🔄📉" if current_dir == 'DOWN' else "🔄📈"
+    prev_peak = state.get('peak_pct', 0)
+    
+    msg = (
+        f"{flip_emoji} <b>HIZLI YÖN DEĞİŞİMİ: {p['symbol']}</b>\n\n"
+        f"<b>Önceki:</b> {'Yukarı ↑' if prev_dir == 'UP' else 'Aşağı ↓'} (%{prev_peak:+.3f}, {stable_duration:.0f}dk boyunca)\n"
+        f"<b>Şimdi:</b> {'Yukarı ↑' if current_dir == 'UP' else 'Aşağı ↓'} (%{diff_pct:+.3f})\n"
+        f"<b>Anlık:</b> ${current_price:.4f}\n"
+        f"<b>Referans:</b> ${ref:.4f}\n"
+        f"<b>Toplam Swing:</b> %{swing_pct:.3f}\n\n"
+        f"<i>💡 {prev_dir} → {current_dir} hızlı dönüş — pozisyon fırsatı!</i>"
+    )
+    await send_notification(msg)
+    
+    state['direction'] = current_dir
+    state['since'] = now_ts
+    state['last_alert'] = now_ts
+    state['peak_pct'] = diff_pct
 
 
 async def _check_premarket_movers():
@@ -331,6 +504,9 @@ async def check_prices_loop():
             # Always check pre-market opens (runs only in the right time window)
             await _check_premarket_opens()
             
+            # Check if market just opened (SPX UP or DOWN result)
+            await _check_market_open_result()
+            
             # Scan for premarket movers (2%+ moves)
             await _check_premarket_movers()
             
@@ -361,6 +537,9 @@ async def check_prices_loop():
                 current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
                 if not current_price:
                     continue
+
+                # Check for rapid direction flips (UP→DOWN or DOWN→UP)
+                await _check_direction_flip(p, current_price)
 
                 ref = p['ref_price']
                 abs_diff_pct = abs((current_price - ref) / ref) * 100
