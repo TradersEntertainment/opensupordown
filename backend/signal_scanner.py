@@ -13,6 +13,7 @@ Strategy:
 import asyncio
 import httpx
 import json
+import io
 import logging
 import os
 import time as time_mod
@@ -23,6 +24,7 @@ import pytz
 from telegram import Bot
 
 import pyth_client
+import image_generator
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +108,58 @@ if TELEGRAM_TOKEN:
 
 # ─── Signal Sender ──────────────────────────────────────────────────────────
 
+def build_card_data(symbol, direction, current_price, ref_price, diff_pct, minutes_to_close, analysis, poly_info, book=None):
+    best_cheap_price = None
+    total_cheap_size = 0.0
+    depth_at_99 = 0.0
+    has_orders_at_99 = False
+    
+    if poly_info and book:
+        cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+        if cheap_asks:
+            best_cheap_price = min(cheap_asks.keys())
+            total_cheap_size = sum(cheap_asks.values())
+            
+        depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+        has_orders_at_99 = depth_at_99 > 0 or (best_cheap_price is not None and best_cheap_price <= 0.99 and total_cheap_size > 0)
+
+    is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
+    is_safe_bet = analysis.get("is_safe_bet", False)
+    
+    up_price = poly_info.get("up_price", 0.0) if poly_info else 0.0
+    down_price = poly_info.get("down_price", 0.0) if poly_info else 0.0
+    safe_price = up_price if direction == "UP" else down_price
+
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "current_price": current_price,
+        "ref_price": ref_price,
+        "diff_pct": diff_pct,
+        "minutes_to_close": minutes_to_close,
+        "is_impossible": is_impossible,
+        "is_safe_bet": is_safe_bet,
+        "has_orders_at_99": has_orders_at_99,
+        "historical": {
+            "confidence_stars": analysis.get("confidence_stars", "❓"),
+            "confidence_label": analysis.get("confidence_label", "VERİ YOK"),
+            "reversed_count": analysis.get("reversed_count", 0),
+            "total_similar_days": analysis.get("total_similar_days", 0),
+            "reversal_rate": analysis.get("reversal_rate", 100.0),
+            "worst_case": analysis.get("worst_case", 0.0)
+        },
+        "poly": {
+            "slug": poly_info.get("slug", "") if poly_info else "",
+            "up_price": up_price,
+            "down_price": down_price,
+            "safe_outcome_price": safe_price,
+            "best_ask": best_cheap_price,
+            "depth_at_best": total_cheap_size,
+            "depth_at_99": depth_at_99,
+            "has_orders_at_99": has_orders_at_99
+        }
+    }
+
 async def send_signal(message: str):
     """Send a signal to the dedicated signal Telegram channel."""
     if not _signal_bot or not SIGNAL_CHAT_ID:
@@ -117,6 +171,28 @@ async def send_signal(message: str):
         )
     except Exception as e:
         logger.error(f"Failed to send signal: {e}")
+
+async def send_signal_with_photo(message: str, photo_bytes: bytes):
+    """Send a signal with a beautifully rendered card photo to the dedicated signal channel."""
+    if not _signal_bot or not SIGNAL_CHAT_ID:
+        logger.warning(f"Signal bot not configured. Missed photo: {message[:100]}")
+        return
+    try:
+        photo_file = io.BytesIO(photo_bytes)
+        photo_file.name = "opportunity_card.png"
+        await _signal_bot.send_photo(
+            chat_id=SIGNAL_CHAT_ID,
+            photo=photo_file,
+            caption=message,
+            parse_mode="HTML"
+        )
+        logger.info("Signal card photo successfully sent to Telegram!")
+    except Exception as e:
+        logger.error(f"Failed to send signal with photo: {e}. Falling back to text-only signal...")
+        try:
+            await send_signal(message)
+        except Exception as e2:
+            logger.error(f"Fallback text signal failed as well: {e2}")
 
 
 # ─── Historical Data Loading ───────────────────────────────────────────────
@@ -589,6 +665,7 @@ async def scan_for_signals():
             poly_price_str = ""
             order_str = ""
             profit_str = ""
+            book = None
 
             poly_info = poly_data.get(symbol)
             if poly_info:
@@ -628,6 +705,24 @@ async def scan_for_signals():
                             f"{best_ask*100:.0f}¢'dan ${total_size:,.0f} alınabilir"
                         )
 
+            # ── Generate the Opportunity Card Image ──
+            photo_bytes = None
+            try:
+                card_data = build_card_data(
+                    symbol=symbol,
+                    direction=direction,
+                    current_price=current_price,
+                    ref_price=ref_price,
+                    diff_pct=diff_pct,
+                    minutes_to_close=minutes_to_close,
+                    analysis=analysis,
+                    poly_info=poly_info,
+                    book=book
+                )
+                photo_bytes = image_generator.generate_card_image(card_data)
+            except Exception as e:
+                logger.error(f"Error generating card image in scan_for_signals: {e}")
+
             # ── Signal decision ──
             key = (symbol, direction)
             now_ts = time_mod.time()
@@ -651,7 +746,10 @@ async def scan_for_signals():
                     f"{poly_price_str}{order_str}\n"
                     f"<b>Güven:</b> {analysis['confidence_stars']} hâlâ geçerli"
                 )
-                await send_signal(update_msg)
+                if photo_bytes:
+                    await send_signal_with_photo(update_msg, photo_bytes)
+                else:
+                    await send_signal(update_msg)
                 _signals_sent_today[key] = {
                     "diff_pct": diff_pct,
                     "time": now_ts,
@@ -695,7 +793,10 @@ async def scan_for_signals():
                 f"<b>{rev['confidence_stars']} {rev['confidence_label']}</b>"
                 f"{profit_str}"
             )
-            await send_signal(msg)
+            if photo_bytes:
+                await send_signal_with_photo(msg, photo_bytes)
+            else:
+                await send_signal(msg)
 
             _signals_sent_today[key] = {
                 "diff_pct": diff_pct,
@@ -876,6 +977,7 @@ async def run_hourly_scan(total_minutes: int):
             profit_str = ""
             slug_link = ""
 
+            book = None
             poly_info = poly_data.get(symbol)
             if poly_info:
                 up_p = poly_info["up_price"]
@@ -946,8 +1048,29 @@ async def run_hourly_scan(total_minutes: int):
                 f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
             )
 
+            # Generate the card image
+            photo_bytes = None
+            try:
+                card_data = build_card_data(
+                    symbol=symbol,
+                    direction=direction,
+                    current_price=current_price,
+                    ref_price=ref_price,
+                    diff_pct=diff_pct,
+                    minutes_to_close=minutes_to_close_val,
+                    analysis=analysis,
+                    poly_info=poly_info,
+                    book=book
+                )
+                photo_bytes = image_generator.generate_card_image(card_data)
+            except Exception as e:
+                logger.error(f"Error generating card image in run_hourly_scan: {e}")
+
             # Send signal to dedicated Telegram signal channel
-            await send_signal(msg)
+            if photo_bytes:
+                await send_signal_with_photo(msg, photo_bytes)
+            else:
+                await send_signal(msg)
             logger.info(f"Hourly signal sent to Telegram: {symbol} {direction}")
 
         except Exception as e:
@@ -1044,6 +1167,7 @@ async def run_manual_scan() -> list:
             depth_at_99 = 0.0
             has_orders_at_99 = False
 
+            book = None
             poly_info = poly_data.get(symbol)
             if poly_info:
                 up_price = poly_info.get("up_price", 0.0)
@@ -1147,8 +1271,30 @@ async def run_manual_scan() -> list:
                         f"<b>{analysis.get('confidence_stars')} {analysis.get('confidence_label')}</b>"
                     )
                     
-                    # Send manual signal to Telegram
-                    await send_signal(msg)
+                    # Generate the card image
+                    photo_bytes = None
+                    try:
+                        card_data = build_card_data(
+                            symbol=symbol,
+                            direction=direction,
+                            current_price=current_price,
+                            ref_price=ref_price,
+                            diff_pct=diff_pct,
+                            minutes_to_close=symbol_minutes_to_close,
+                            analysis=analysis,
+                            poly_info=poly_info,
+                            book=book
+                        )
+                        photo_bytes = image_generator.generate_card_image(card_data)
+                    except Exception as e:
+                        logger.error(f"Error generating card image in manual scan: {e}")
+
+                    # Send manual signal with photo to Telegram
+                    if photo_bytes:
+                        await send_signal_with_photo(msg, photo_bytes)
+                    else:
+                        await send_signal(msg)
+
                     _signals_sent_today[key] = {
                         "diff_pct": diff_pct,
                         "time": now_ts
