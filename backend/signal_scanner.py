@@ -755,6 +755,177 @@ def minutes_to_close(total_minutes: int) -> int:
 def start_signal_scanner():
     """Start the signal scanner background task."""
     asyncio.create_task(signal_scanner_loop())
+    asyncio.create_task(hourly_scanner_loop())
+
+
+_last_hourly_scan_hour = -1
+
+
+async def hourly_scanner_loop():
+    """Background loop to run a general scan every hour during the trading session."""
+    global _last_hourly_scan_hour, _cache_loaded
+
+    logger.info("Hourly Signal Scanner starting...")
+
+    # Wait for initial history load if needed
+    while not _cache_loaded:
+        await asyncio.sleep(5)
+
+    while True:
+        try:
+            et_tz = pytz.timezone("US/Eastern")
+            now_et = datetime.now(et_tz)
+            total_minutes = now_et.hour * 60 + now_et.minute
+            today_weekday = now_et.weekday()
+
+            # Weekdays only
+            if today_weekday >= 5:
+                await asyncio.sleep(60)
+                continue
+
+            # Regular trading hours (9:30 AM to 4:00 PM ET)
+            # We want to scan at exactly 10:00, 11:00, 12:00, 13:00, 14:00, 15:00 ET
+            if 570 <= total_minutes < 960:
+                # Trigger on the hour (e.g. minute == 0)
+                if now_et.minute == 0 and _last_hourly_scan_hour != now_et.hour:
+                    _last_hourly_scan_hour = now_et.hour
+                    logger.info(f"Running hourly signal scan for {now_et.hour}:00 ET...")
+                    await run_hourly_scan(total_minutes)
+                    
+            # Check every 30 seconds
+            await asyncio.sleep(30)
+
+        except Exception as e:
+            logger.error(f"Error in hourly scanner loop: {e}")
+            await asyncio.sleep(10)
+
+
+async def run_hourly_scan(total_minutes: int):
+    """
+    Perform an hourly scan of all watchlist stocks and send detailed Telegram alerts
+    for any 'impossible' (safe bet) opportunities found.
+    """
+    # 1. Fetch active Polymarket events
+    poly_data = await fetch_polymarket_events()
+
+    minutes_to_close_val = max(0, 960 - total_minutes)
+    hours_left = minutes_to_close_val // 60
+    mins_left = minutes_to_close_val % 60
+
+    for symbol in SCAN_WATCHLIST:
+        try:
+            pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
+            if not pyth_id:
+                continue
+
+            current_price = await pyth_client.get_active_price(symbol, pyth_id)
+            if not current_price:
+                continue
+
+            from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+            ref_price = await pyth_client.get_historical_candle_price(
+                full_symbol, pyth_id, from_ts, to_ts, price_type="close"
+            )
+            if not ref_price or ref_price == 0:
+                continue
+
+            diff_pct = ((current_price - ref_price) / ref_price) * 100
+            abs_diff = abs(diff_pct)
+            direction = "UP" if diff_pct > 0 else "DOWN"
+
+            # Reversal analysis
+            analysis = analyze_reversal_risk(symbol, diff_pct, minutes_to_close_val)
+
+            # Check if it qualifies as an "impossible" or safe bet opportunity
+            is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
+            is_safe_bet = analysis.get("is_safe_bet", False)
+
+            if not (is_impossible or is_safe_bet):
+                continue
+
+            # Fetch Polymarket pricing + orderbook depth
+            poly_price_str = ""
+            order_str = ""
+            profit_str = ""
+            slug_link = ""
+
+            poly_info = poly_data.get(symbol)
+            if poly_info:
+                up_p = poly_info["up_price"]
+                down_p = poly_info["down_price"]
+                poly_slug = poly_info["slug"]
+                slug_link = f"https://polymarket.com/event/{poly_slug}"
+
+                poly_price_str = f"Up {up_p*100:.0f}¢ / Down {down_p*100:.0f}¢"
+
+                safe_price = up_p if direction == "UP" else down_p
+                safe_token = (
+                    poly_info.get("up_token_id")
+                    if direction == "UP"
+                    else poly_info.get("down_token_id")
+                )
+
+                if safe_price > 0:
+                    profit_pct = ((1.0 - safe_price) / safe_price) * 100
+                    profit_str = f"<b>{direction}</b> kontratı al ({safe_price*100:.0f}¢ ➔ $1.00 = %{profit_pct:.1f} tahmini kâr)"
+
+                # Orderbook depth
+                if safe_token:
+                    book = await fetch_orderbook_depth(safe_token)
+                    
+                    cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+                    if cheap_asks:
+                        best_ask = min(cheap_asks.keys())
+                        total_size = sum(cheap_asks.values())
+                        order_str = f"{best_ask*100:.0f}¢ fiyattan ${total_size:,.0f} alım yapılabilir"
+                        
+                        # Add specific depth at 99c if available
+                        depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+                        if depth_at_99 > 0:
+                            order_str += f" (99¢'da ${depth_at_99:,.0f} aktif satıcı)"
+                    else:
+                        order_str = "Satış emri bulunmuyor"
+
+            # Format historical analysis text
+            hist_str = f"• Son 60 günde %{abs_diff:.1f}+ seviyesinde: {analysis['reversed_count']}/{analysis['total_similar_days']} kez ters döndü ➔ %{analysis['reversal_rate']:.1f}\n"
+            if analysis["worst_case"] != 0:
+                hist_str += f"• En kötü kapanış senaryosu: %{analysis['worst_case']:+.2f}"
+            else:
+                hist_str += "• En kötü kapanış senaryosu: Hiç ters dönmemiş ✅"
+
+            # ── Construct Telegram Alert Message ──
+            msg = (
+                f"🎯 <b>SAATLİK SİNYAL SCANNER - GÜVENLİ BAHİS SİNYALİ</b>\n\n"
+                f"📊 <b>{symbol} {direction}</b>\n"
+                f"<b>Anlık Fiyat:</b> ${current_price:.2f} ({diff_pct:+.2f}%)\n"
+                f"<b>Dünkü Kapanış:</b> ${ref_price:.2f}\n"
+                f"<b>Kapanışa Kalan Süre:</b> {hours_left} saat {mins_left} dakika\n\n"
+                f"📈 <b>Tarihsel Analiz (son 60 gün):</b>\n"
+                f"{hist_str}\n\n"
+            )
+
+            if poly_price_str:
+                msg += (
+                    f"💰 <b>Polymarket:</b> {poly_price_str}\n"
+                    f"💵 <b>Tavsiye:</b> {profit_str}\n"
+                    f"📦 <b>Emir Kitabı (CLOB):</b> {order_str}\n\n"
+                )
+
+            if slug_link:
+                msg += f"🔗 <a href='{slug_link}'>Polymarket'te İşlem Yap ↗</a>\n"
+                
+            msg += (
+                f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
+            )
+
+            # Send signal to dedicated Telegram signal channel
+            await send_signal(msg)
+            logger.info(f"Hourly signal sent to Telegram: {symbol} {direction}")
+
+        except Exception as e:
+            logger.error(f"Error scanning {symbol} during hourly scan: {e}")
+
 
 
 async def run_manual_scan() -> list:
