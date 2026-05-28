@@ -17,6 +17,7 @@ import logging
 import os
 import time as time_mod
 from datetime import datetime, timedelta
+import re
 
 import pytz
 from telegram import Bot
@@ -35,13 +36,14 @@ CLOB_API = "https://clob.polymarket.com"
 
 # Scan window: 15:00-16:00 ET (22:00-23:00 TR)
 SCAN_START_MINUTES = 900   # 15:00 ET
-SCAN_END_MINUTES = 960     # 16:00 ET
+SCAN_END_MINUTES = 1020     # 17:00 ET (24:00 TR) to cover commodities close
 SCAN_INTERVAL = 60         # Every 60 seconds
 
 # Stocks to scan
 SCAN_WATCHLIST = [
     "SPY", "PLTR", "TSLA", "NVDA", "AAPL", "AMZN", "META", "GOOGL",
     "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY", "OPEN",
+    "WTI", "XAU", "XAG"
 ]
 
 # Slug → symbol mapping for Polymarket event discovery
@@ -77,6 +79,11 @@ SLUG_TO_SYMBOL = {
     "ewy-up-or-down": "EWY",
     "opendoor-up-or-down": "OPEN",
     "open-up-or-down": "OPEN",
+    "wti-up-or-down": "WTI",
+    "xauusd-up-or-down": "XAU",
+    "xagusd-up-or-down": "XAG",
+    "xau-up-or-down": "XAU",
+    "xag-up-or-down": "XAG",
 }
 
 # ─── State ──────────────────────────────────────────────────────────────────
@@ -207,7 +214,9 @@ async def load_historical_data():
                 for candle in curr_candles:
                     price = candle["open"]
                     diff = ((price - prev_close) / prev_close) * 100
-                    mtc = max(0, 960 - (candle["hour"] * 60 + candle["minute"]))
+                    is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+                    close_mins = 1020 if is_commodity else 960
+                    mtc = max(0, close_mins - (candle["hour"] * 60 + candle["minute"]))
                     snapshots.append({
                         "hour": candle["hour"],
                         "price": price,
@@ -406,6 +415,10 @@ async def fetch_polymarket_events() -> dict:
                 slugs_to_try.append(f"sp-500-up-or-down-on-{month_name}-{day}-{year}")
             elif symbol == "OPEN":
                 slugs_to_try.append(f"opendoor-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "XAU":
+                slugs_to_try.append(f"xauusd-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "XAG":
+                slugs_to_try.append(f"xagusd-up-or-down-on-{month_name}-{day}-{year}")
 
             async with httpx.AsyncClient() as client:
                 for s in slugs_to_try:
@@ -516,13 +529,19 @@ async def scan_for_signals():
     et_tz = pytz.timezone("US/Eastern")
     now_et = datetime.now(et_tz)
     total_minutes = now_et.hour * 60 + now_et.minute
-    minutes_to_close = max(0, SCAN_END_MINUTES - total_minutes)
-
     # Fetch Polymarket data (cached 30s)
     poly_data = await fetch_polymarket_events()
 
     for symbol in SCAN_WATCHLIST:
         try:
+            # Skip stocks if they are closed (after 4:00 PM ET / 960 mins)
+            is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+            if not is_commodity and total_minutes >= 960:
+                continue
+
+            # Calculate individual minutes to close
+            close_minutes = 1020 if is_commodity else 960
+            minutes_to_close = max(0, close_minutes - total_minutes)
             pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
             if not pyth_id:
                 continue
@@ -682,6 +701,9 @@ async def scan_for_signals():
 
         except Exception as e:
             logger.error(f"Error scanning {symbol}: {e}")
+
+    # Also scan WTI Closes Above markets
+    await scan_closes_above_markets(total_minutes)
 
 
 # ─── Background Loop ───────────────────────────────────────────────────────
@@ -926,6 +948,9 @@ async def run_hourly_scan(total_minutes: int):
         except Exception as e:
             logger.error(f"Error scanning {symbol} during hourly scan: {e}")
 
+    # Also scan WTI Closes Above markets hourly
+    await scan_closes_above_markets(total_minutes)
+
 
 
 async def run_manual_scan() -> list:
@@ -993,8 +1018,16 @@ async def run_manual_scan() -> list:
             diff_pct = ((current_price - ref_price) / ref_price) * 100
             direction = "UP" if diff_pct > 0 else "DOWN"
 
+            # Calculate actual minutes to close for this specific symbol
+            is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+            if is_off_hours:
+                symbol_minutes_to_close = minutes_to_close_val
+            else:
+                close_mins = 1020 if is_commodity else 960
+                symbol_minutes_to_close = max(0, close_mins - total_minutes)
+
             # Reversal analysis
-            analysis = analyze_reversal_risk(symbol, diff_pct, minutes_to_close_val)
+            analysis = analyze_reversal_risk(symbol, diff_pct, symbol_minutes_to_close)
 
             # Polymarket details
             up_price = 0.0
@@ -1043,7 +1076,7 @@ async def run_manual_scan() -> list:
                 "current_price": current_price,
                 "ref_price": ref_price,
                 "diff_pct": diff_pct,
-                "minutes_to_close": minutes_to_close_val,
+                "minutes_to_close": symbol_minutes_to_close,
                 "is_off_hours": is_off_hours,
                 "off_hours_reason": off_hours_reason,
                 "historical": {
@@ -1097,4 +1130,223 @@ async def run_manual_scan() -> list:
 
     filtered_results.sort(key=sort_key, reverse=True)
     return filtered_results
+
+
+async def scan_closes_above_markets(total_minutes: int):
+    """
+    Scans the WTI 'closes above' markets on Polymarket.
+    Compares the current WTI price with each market threshold,
+    calculates historical move probabilities, and signals any 'impossible' bets
+    that have orderbook depth at 99c.
+    """
+    et_tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et_tz)
+    
+    # 1. Get current WTI price
+    pyth_id, full_symbol = pyth_client.get_pyth_id("WTI")
+    if not pyth_id:
+        return
+        
+    current_wti = await pyth_client.get_active_price("WTI", pyth_id)
+    if not current_wti:
+        return
+
+    # Calculate minutes to close for WTI (closes at 17:00 ET = 1020 mins)
+    minutes_to_close_val = max(0, 1020 - total_minutes)
+    hours_left = minutes_to_close_val // 60
+    mins_left = minutes_to_close_val % 60
+
+    # 2. Fetch the WTI Closes Above event
+    month_name = now_et.strftime("%B").lower()
+    day = now_et.day
+    year = now_et.year
+    slug = f"wti-closes-above-on-{month_name}-{day}-{year}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{GAMMA_API}/events/slug/{slug}", timeout=10.0)
+            if resp.status_code != 200:
+                logger.debug(f"WTI closes above event {slug} not found or not active")
+                return
+            event = resp.json()
+
+        markets = event.get("markets", [])
+        if not markets:
+            return
+
+        for market in markets:
+            question = market.get("question", "")
+            # Match "closes above $XX" or "closes above $XX.XX"
+            match = re.search(r"closes\s+above\s+\$([\d\.]+)", question, re.IGNORECASE)
+            if not match:
+                continue
+
+            threshold = float(match.group(1))
+            
+            # Determine the safe direction and required price move (dist)
+            if threshold > current_wti:
+                safe_outcome = "No"
+                reversal_direction = "UP"
+                required_move = threshold - current_wti
+                pct_move = (required_move / current_wti) * 100
+                move_desc = f"+${required_move:.2f} (+{pct_move:.2f}%)"
+            else:
+                safe_outcome = "Yes"
+                reversal_direction = "DOWN"
+                required_move = current_wti - threshold
+                pct_move = (required_move / current_wti) * 100
+                move_desc = f"-${required_move:.2f} (-{pct_move:.2f}%)"
+
+            # Reversal threshold distance must be significant to avoid noise
+            if required_move < 0.1:
+                continue
+
+            # 3. Historical analysis
+            analysis = analyze_wti_move_risk(required_move, reversal_direction, minutes_to_close_val)
+            
+            is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
+            if not is_impossible:
+                continue
+
+            # 4. Check Polymarket pricing + orderbook depth for the safe outcome
+            outcomes = json.loads(market.get("outcomes", "[]"))
+            outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+            token_ids = json.loads(market.get("clobTokenIds", "[]"))
+
+            safe_idx = None
+            for idx, o in enumerate(outcomes):
+                if o.lower() == safe_outcome.lower():
+                    safe_idx = idx
+                    break
+
+            if safe_idx is None or safe_idx >= len(outcome_prices):
+                continue
+
+            safe_price = float(outcome_prices[safe_idx])
+            safe_token = token_ids[safe_idx] if len(token_ids) > safe_idx else None
+
+            # Only signal if safe outcome price is cheap/realistic (e.g. >= 0.90 / 90c)
+            if safe_price < 0.90:
+                continue
+
+            order_str = ""
+            best_ask = None
+            total_size = 0.0
+            depth_at_99 = 0.0
+
+            if safe_token:
+                book = await fetch_orderbook_depth(safe_token)
+                cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+                if cheap_asks:
+                    best_ask = min(cheap_asks.keys())
+                    total_size = sum(cheap_asks.values())
+                    order_str = f"{best_ask*100:.0f}¢ fiyattan ${total_size:,.0f} alım yapılabilir"
+                    
+                    depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+                    if depth_at_99 > 0:
+                        order_str += f" (99¢'da ${depth_at_99:,.0f} aktif satıcı)"
+                else:
+                    order_str = "Satış emri bulunmuyor"
+
+            profit_pct = ((1.0 - safe_price) / safe_price) * 100
+            
+            # Format and send Telegram Alert!
+            msg = (
+                f"🎯 <b>FINANS SCANNER - WTI SEVİYE ALARMI</b>\n\n"
+                f"📊 <b>Petrol Kapanış Seviyesi</b>\n"
+                f"<b>Soru:</b> {question}\n"
+                f"<b>Petrol Anlık Fiyat:</b> ${current_wti:.2f}\n"
+                f"<b>Seviye Hedefi:</b> ${threshold:.2f}\n"
+                f"<b>Gerekli Risk Mesafesi:</b> {move_desc}\n"
+                f"<b>Kapanışa Kalan Süre:</b> {hours_left} saat {mins_left} dakika\n\n"
+                f"📈 <b>Tarihsel Analiz (son 60 gün):</b>\n"
+                f"• WTI son 60 günde bu saat diliminde {move_desc} kadar ters yönde "
+                f"<b>{analysis['reversed_count']}/{analysis['total_similar_days']} kez</b> hareket etti (İhtimal: %{analysis['reversal_rate']:.1f})\n"
+                f"• En büyük ters hareket: {analysis['max_reversal_move']}\n\n"
+                f"💰 <b>Polymarket Safe Outcome:</b> '{safe_outcome}' ({safe_price*100:.1f}¢ ➔ $1.00 = %{profit_pct:.1f} tahmini kâr)\n"
+                f"📦 <b>Emir Kitabı (CLOB):</b> {order_str}\n\n"
+                f"🔗 <a href='https://polymarket.com/event/{slug}'>Polymarket'te İşlem Yap ↗</a>\n"
+                f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
+            )
+
+            await send_signal(msg)
+            logger.info(f"WTI Closes Above signal sent: {question} -> {safe_outcome} at {safe_price}")
+
+    except Exception as e:
+        logger.error(f"Error scanning WTI Closes Above markets: {e}")
+
+
+def analyze_wti_move_risk(required_move: float, direction: str, minutes_to_close: int) -> dict:
+    """
+    Calculate the historical probability of WTI moving by 'required_move' or more
+    in the remaining 'minutes_to_close' time in the last 60 days.
+    """
+    if "WTI" not in _historical_cache:
+        return {
+            "reversed_count": 99,
+            "total_similar_days": 0,
+            "reversal_rate": 100.0,
+            "max_reversal_move": "Veri yok",
+            "confidence_stars": "❓",
+            "confidence_label": "VERİ YOK",
+        }
+
+    data = _historical_cache["WTI"]
+    total = 0
+    reversed_count = 0
+    max_reversal_move = 0.0
+
+    for day in data:
+        best_match = None
+        for snap in day["snapshots"]:
+            if abs(snap["minutes_to_close"] - minutes_to_close) <= 30:
+                if best_match is None or abs(snap["minutes_to_close"] - minutes_to_close) < abs(best_match["minutes_to_close"] - minutes_to_close):
+                    best_match = snap
+
+        if best_match is None:
+            continue
+
+        total += 1
+        
+        # Calculate WTI change from snap to close
+        change = day["final_close"] - best_match["price"]
+        
+        if direction == "UP":
+            if change >= required_move:
+                reversed_count += 1
+            if change > max_reversal_move:
+                max_reversal_move = change
+        else:
+            if change <= -required_move:
+                reversed_count += 1
+            if -change > max_reversal_move:
+                max_reversal_move = -change
+
+    reversal_rate = (reversed_count / total * 100) if total > 0 else 100.0
+
+    # Confidence stars
+    if total >= 5:
+        if reversed_count == 0:
+            stars, label = "⭐⭐⭐⭐⭐", "ÇOK GÜVENLİ"
+        elif reversed_count == 1:
+            stars, label = "⭐⭐⭐⭐", "GÜVENLİ"
+        elif reversal_rate <= 5:
+            stars, label = "⭐⭐⭐", "ORTA"
+        else:
+            stars, label = "⭐⭐", "RİSKLİ"
+    else:
+        stars, label = "❓", "YETERSİZ VERİ"
+
+    max_move_desc = f"+${max_reversal_move:.2f}" if direction == "UP" else f"-${max_reversal_move:.2f}"
+
+    return {
+        "total_similar_days": total,
+        "reversed_count": reversed_count,
+        "reversal_rate": reversal_rate,
+        "max_reversal_move": max_move_desc,
+        "confidence_stars": stars,
+        "confidence_label": label,
+    }
+
 
