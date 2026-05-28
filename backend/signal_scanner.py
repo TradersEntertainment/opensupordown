@@ -307,7 +307,6 @@ async def send_english_delayed_task(card_data: dict, scan_type: str):
             msg_en += f"🔗 <a href='{slug_link}'>Trade on Polymarket ↗</a>\n"
             
         msg_en += (
-            f"🖥️ <a href='https://opensupordown.railway.app'>Live Dashboard ↗</a>\n\n"
             f"<b>{hist.get('confidence_stars')} {confidence_label_en}</b>"
         )
         
@@ -382,8 +381,7 @@ async def send_delayed_wti_alarm_task(wti_data: dict):
             f"• Largest opposite move: {max_reversal_move}\n\n"
             f"💰 <b>Polymarket Safe Outcome:</b> '{safe_outcome}' ({safe_price*100:.1f}¢ ➔ $1.00 = {profit_pct:.1f}% expected yield)\n"
             f"📦 <b>CLOB Order Book:</b> {order_str}\n\n"
-            f"🔗 <a href='https://polymarket.com/event/{slug}'>Trade on Polymarket ↗</a>\n"
-            f"🖥️ <a href='https://opensupordown.railway.app'>Live Dashboard ↗</a>\n\n"
+            f"🔗 <a href='https://polymarket.com/event/{slug}'>Trade on Polymarket ↗</a>\n\n"
             f"<b>{analysis.get('confidence_stars')} {confidence_label_en}</b>"
         )
         
