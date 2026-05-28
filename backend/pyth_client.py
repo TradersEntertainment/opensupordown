@@ -29,7 +29,7 @@ SYMBOL_MAP = {
     "NFLX": "Equity.US.NFLX/USD",
     "RKLB": "Equity.US.RKLB/USD",
     "EWY": "Equity.US.EWY/USD",
-    "WTI": "Crypto.WTI/USD", # Pyth often lists commodities under Crypto or Metal
+    "WTI": "Commodities.USOILSPOT",
     "GOLD": "Metal.XAU/USD",
     "XAU": "Metal.XAU/USD",
     "XAUUSD": "Metal.XAU/USD",
