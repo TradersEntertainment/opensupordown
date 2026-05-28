@@ -60,6 +60,8 @@ SLUG_SYMBOL_MAP = {
     "ftse-up-or-down": ("UKX", "close"),
     "nya-up-or-down": ("NYA", "close"),
     "bitcoin-up-or-down": ("BTC", "close"),
+    "mu-up-or-down": ("MU", "close"),
+    "micron-up-or-down": ("MU", "close"),
 }
 
 

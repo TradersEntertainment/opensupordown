@@ -27,7 +27,7 @@ PREMARKET_SCAN_INTERVAL = 180  # Check every 3 minutes
 # Stocks to scan in pre-market (ones that have Polymarket Up/Down bets)
 PREMARKET_WATCHLIST = [
     "SPY", "PLTR", "TSLA", "NVDA", "AAPL", "AMZN", "META", "GOOGL",
-    "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY"
+    "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY", "MU"
 ]
 
 # --- Market Open Result State ---

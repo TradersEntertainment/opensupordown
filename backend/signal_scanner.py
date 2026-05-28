@@ -46,7 +46,7 @@ SCAN_INTERVAL = 60         # Every 60 seconds
 SCAN_WATCHLIST = [
     "SPY", "PLTR", "TSLA", "NVDA", "AAPL", "AMZN", "META", "GOOGL",
     "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY", "OPEN",
-    "WTI", "XAU", "XAG", "HSI", "NG", "NKY", "UKX", "DIA", "DAX", 
+    "MU", "WTI", "XAU", "XAG", "HSI", "NG", "NKY", "UKX", "DIA", "DAX", 
     "RUT", "NYA"
 ]
 
@@ -102,6 +102,8 @@ SLUG_TO_SYMBOL = {
     "rut-up-or-down": "RUT",
     "russell-2000-up-or-down": "RUT",
     "nya-up-or-down": "NYA",
+    "mu-up-or-down": "MU",
+    "micron-up-or-down": "MU",
 }
 
 # ─── State ──────────────────────────────────────────────────────────────────

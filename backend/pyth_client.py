@@ -28,6 +28,7 @@ SYMBOL_MAP = {
     "COIN": "Equity.US.COIN/USD",
     "NFLX": "Equity.US.NFLX/USD",
     "RKLB": "Equity.US.RKLB/USD",
+    "MU": "Equity.US.MU/USD",
     "EWY": "Equity.US.EWY/USD",
     "WTI": "Commodities.USOILSPOT",
     "GOLD": "Metal.XAU/USD",
