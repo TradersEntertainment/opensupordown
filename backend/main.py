@@ -8,6 +8,7 @@ import pyth_client
 import tracker_engine
 import telegram_bot
 import poly_tracker
+import signal_scanner
 
 app = FastAPI(title="Poly Up/Down Tracker API")
 
@@ -32,6 +33,9 @@ async def startup_event():
     
     # Start Polymarket auto position sync
     poly_tracker.start_sync_task()
+    
+    # Start Finance Signal Scanner
+    signal_scanner.start_signal_scanner()
     
     # Start Telegram bot
     global tg_app
