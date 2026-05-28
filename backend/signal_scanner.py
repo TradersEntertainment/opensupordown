@@ -1148,14 +1148,25 @@ async def run_manual_scan() -> list:
 
             # Calculate actual minutes to close for this specific symbol
             is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+            
+            close_mins = 1020 if is_commodity else 960
+            real_minutes_to_close = max(0, close_mins - total_minutes)
+            
             if is_off_hours:
-                symbol_minutes_to_close = minutes_to_close_val
+                # If pre-market on a trading day, use real time left for display, but cap risk analysis to opening candle (360/420 mins)
+                if total_minutes < 570 and now_et.weekday() < 5:
+                    symbol_minutes_to_close = real_minutes_to_close
+                    analysis_minutes = min(360 if not is_commodity else 420, real_minutes_to_close)
+                else:
+                    # Weekend or After-hours default simulation
+                    symbol_minutes_to_close = minutes_to_close_val
+                    analysis_minutes = minutes_to_close_val
             else:
-                close_mins = 1020 if is_commodity else 960
-                symbol_minutes_to_close = max(0, close_mins - total_minutes)
+                symbol_minutes_to_close = real_minutes_to_close
+                analysis_minutes = real_minutes_to_close
 
-            # Reversal analysis
-            analysis = analyze_reversal_risk(symbol, diff_pct, symbol_minutes_to_close)
+            # Reversal analysis (using capped session minutes to match historical trading hours)
+            analysis = analyze_reversal_risk(symbol, diff_pct, analysis_minutes)
 
             # Polymarket details
             up_price = 0.0
