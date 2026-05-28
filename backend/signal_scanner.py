@@ -376,7 +376,7 @@ def analyze_reversal_risk(
 
 async def fetch_polymarket_events() -> dict:
     """
-    Fetch active Up/Down events from Polymarket Gamma API.
+    Fetch active Up/Down events from Polymarket Gamma API by dynamically generating slugs.
     Returns: {symbol: {up_price, down_price, up_token_id, down_token_id, slug}}
     """
     global _poly_cache, _last_poly_time
@@ -386,63 +386,72 @@ async def fetch_polymarket_events() -> dict:
         return _poly_cache
 
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{GAMMA_API}/events",
-                params={"active": "true", "closed": "false", "limit": "100"},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            events = resp.json()
-
+        et_tz = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et_tz)
+        
+        # Generate the standard monthly format (e.g. "may-28-2026")
+        month_name = now_et.strftime("%B").lower()
+        day = now_et.day
+        year = now_et.year
+        
         results = {}
-        for event in events:
-            slug = (event.get("slug") or "").lower()
 
-            # Match to our watchlist
-            matched_symbol = None
-            for slug_key, sym in SLUG_TO_SYMBOL.items():
-                if slug_key in slug:
-                    matched_symbol = sym
-                    break
-            if not matched_symbol:
-                continue
-            # Skip "opens" bets — we only care about daily close bets
-            if "opens" in slug:
-                continue
+        async def fetch_single_symbol(symbol: str):
+            ticker = symbol.lower()
+            slug = f"{ticker}-up-or-down-on-{month_name}-{day}-{year}"
+            
+            slugs_to_try = [slug]
+            if symbol == "SPY":
+                slugs_to_try.append(f"spx-up-or-down-on-{month_name}-{day}-{year}")
+                slugs_to_try.append(f"sp-500-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "OPEN":
+                slugs_to_try.append(f"opendoor-up-or-down-on-{month_name}-{day}-{year}")
 
-            markets = event.get("markets", [])
-            if not markets:
-                continue
+            async with httpx.AsyncClient() as client:
+                for s in slugs_to_try:
+                    url = f"{GAMMA_API}/events/slug/{s}"
+                    try:
+                        resp = await client.get(url, timeout=5.0)
+                        if resp.status_code != 200:
+                            continue
+                            
+                        event = resp.json()
+                        markets = event.get("markets", [])
+                        if not markets:
+                            continue
 
-            market = markets[0]
-            try:
-                outcomes = json.loads(market.get("outcomes", "[]"))
-                prices = json.loads(market.get("outcomePrices", "[]"))
-                token_ids = json.loads(market.get("clobTokenIds", "[]"))
-            except (json.JSONDecodeError, TypeError):
-                continue
+                        market = markets[0]
+                        outcomes = json.loads(market.get("outcomes", "[]"))
+                        prices = json.loads(market.get("outcomePrices", "[]"))
+                        token_ids = json.loads(market.get("clobTokenIds", "[]"))
 
-            if len(outcomes) < 2 or len(prices) < 2:
-                continue
+                        if len(outcomes) < 2 or len(prices) < 2:
+                            continue
 
-            up_idx = down_idx = None
-            for i, o in enumerate(outcomes):
-                if o.lower() == "up":
-                    up_idx = i
-                elif o.lower() == "down":
-                    down_idx = i
+                        up_idx = down_idx = None
+                        for i, o in enumerate(outcomes):
+                            if o.lower() == "up":
+                                up_idx = i
+                            elif o.lower() == "down":
+                                down_idx = i
 
-            if up_idx is None or down_idx is None:
-                continue
+                        if up_idx is None or down_idx is None:
+                            continue
 
-            results[matched_symbol] = {
-                "up_price": float(prices[up_idx]),
-                "down_price": float(prices[down_idx]),
-                "up_token_id": token_ids[up_idx] if len(token_ids) > up_idx else None,
-                "down_token_id": token_ids[down_idx] if len(token_ids) > down_idx else None,
-                "slug": slug,
-            }
+                        results[symbol] = {
+                            "up_price": float(prices[up_idx]),
+                            "down_price": float(prices[down_idx]),
+                            "up_token_id": token_ids[up_idx] if len(token_ids) > up_idx else None,
+                            "down_token_id": token_ids[down_idx] if len(token_ids) > down_idx else None,
+                            "slug": s,
+                        }
+                        break # Found successfully, stop trying other slugs for this symbol
+                    except Exception as e:
+                        logger.debug(f"Error fetching slug {s}: {e}")
+
+        # Fetch all symbols in parallel
+        tasks = [fetch_single_symbol(symbol) for symbol in SCAN_WATCHLIST]
+        await asyncio.gather(*tasks)
 
         _poly_cache = results
         _last_poly_time = now
@@ -451,6 +460,7 @@ async def fetch_polymarket_events() -> dict:
     except Exception as e:
         logger.error(f"Error fetching Polymarket events: {e}")
         return _poly_cache
+
 
 
 async def fetch_orderbook_depth(token_id: str) -> dict:
