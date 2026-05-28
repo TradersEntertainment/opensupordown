@@ -50,6 +50,9 @@ SYMBOL_MAP = {
 # Cache for resolved IDs
 pyth_id_cache = {}
 
+# In-memory cache for historical candle prices to avoid 429 rate limiting
+_historical_price_cache = {}
+
 async def init_feeds_cache():
     """Fetches all price feeds from hermes to memorize symbol to ID mapping."""
     try:
@@ -157,7 +160,15 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
     """
     Fetches the exact 'Close' or 'Open' price of the 1-minute candle from Pyth's TV history API.
     Falls back to Hermes historical API if TV shim fails.
+    Uses in-memory cache to prevent 429 rate limiting.
     """
+    cache_key = (full_symbol, from_ts, to_ts, price_type)
+    if cache_key in _historical_price_cache:
+        cached_price = _historical_price_cache[cache_key]
+        if cached_price is not None:
+            logger.info(f"Using cached historical price for {full_symbol}: {cached_price}")
+            return cached_price
+
     url = f"{BENCHMARKS_URL}/shims/tradingview/history"
     params = {
         "symbol": full_symbol,
@@ -177,7 +188,9 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
             
             if data.get("s") == "ok" and target_key in data and len(data[target_key]) > 0:
                 price = data[target_key][-1] if price_type == 'close' else data[target_key][0]
-                return float(price)
+                res_price = float(price)
+                _historical_price_cache[cache_key] = res_price
+                return res_price
             else:
                 logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Response: {data.get('s')}. Falling back to Hermes history API...")
                 clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
@@ -195,7 +208,9 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
                             p_str = price_info.get("price")
                             e_str = price_info.get("expo")
                             if p_str and e_str:
-                                return float(p_str) * (10 ** int(e_str))
+                                res_price = float(p_str) * (10 ** int(e_str))
+                                _historical_price_cache[cache_key] = res_price
+                                return res_price
                                 
                 logger.error(f"Fallback to Hermes History failed for {full_symbol} at {target_ts}")
                 return None

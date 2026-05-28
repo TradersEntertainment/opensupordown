@@ -462,8 +462,13 @@ async def fetch_polymarket_events() -> dict:
                     except Exception as e:
                         logger.debug(f"Error fetching slug {s}: {e}")
 
-        # Fetch all symbols in parallel
-        tasks = [fetch_single_symbol(symbol) for symbol in SCAN_WATCHLIST]
+        # Fetch all symbols in parallel using a semaphore to avoid rate limit issues
+        sem = asyncio.Semaphore(5)
+        async def fetch_single_symbol_sem(symbol):
+            async with sem:
+                await fetch_single_symbol(symbol)
+
+        tasks = [fetch_single_symbol_sem(symbol) for symbol in SCAN_WATCHLIST]
         await asyncio.gather(*tasks)
 
         _poly_cache = results
@@ -1070,6 +1075,86 @@ async def run_manual_scan() -> list:
             # Let's count it as a "safe bet" if it is marked as safe in analysis
             is_safe_bet = analysis.get("is_safe_bet", False)
 
+            # If the opportunity is safe/impossible, let's send a Telegram signal if not sent recently
+            if is_impossible or is_safe_bet:
+                key = (symbol, direction, "manual")
+                now_ts = time_mod.time()
+                should_send = True
+                
+                # Deduplication guard: only send if not sent in the last 5 minutes AND diff changed < 0.3%
+                if key in _signals_sent_today:
+                    prev = _signals_sent_today[key]
+                    if now_ts - prev["time"] < 300 and abs(abs(diff_pct) - abs(prev["diff_pct"])) < 0.3:
+                        should_send = False
+                
+                if should_send:
+                    # Construct manual signal Telegram message
+                    hours_left = symbol_minutes_to_close // 60
+                    mins_left = symbol_minutes_to_close % 60
+                    
+                    poly_price_str = ""
+                    order_str = ""
+                    profit_str = ""
+                    slug_link = ""
+                    
+                    if poly_info:
+                        up_p = poly_info.get("up_price", 0.0)
+                        down_p = poly_info.get("down_price", 0.0)
+                        poly_slug = poly_info.get("slug", "")
+                        slug_link = f"https://polymarket.com/event/{poly_slug}"
+                        
+                        poly_price_str = f"Up {up_p*100:.0f}¢ / Down {down_p*100:.0f}¢"
+                        
+                        if safe_price > 0:
+                            profit_pct = ((1.0 - safe_price) / safe_price) * 100
+                            profit_str = f"<b>{direction}</b> kontratı al ({safe_price*100:.0f}¢ ➔ $1.00 = %{profit_pct:.1f} tahmini kâr)"
+                            
+                        if best_cheap_price is not None:
+                            order_str = f"{best_cheap_price*100:.0f}¢ fiyattan ${total_cheap_size:,.0f} alım yapılabilir"
+                            if depth_at_99 > 0:
+                                order_str += f" (99¢'da ${depth_at_99:,.0f} aktif satıcı)"
+                        else:
+                            order_str = "Satış emri bulunmuyor"
+                            
+                    hist_str = f"• Son 60 günde %{abs(diff_pct):.1f}+ seviyesinde: {analysis.get('reversed_count')}/{analysis.get('total_similar_days')} kez ters döndü ➔ %{analysis.get('reversal_rate'):.1f}\n"
+                    if analysis.get("worst_case") != 0:
+                        hist_str += f"• En kötü kapanış senaryosu: %{analysis.get('worst_case'):+.2f}"
+                    else:
+                        hist_str += "• En kötü kapanış senaryosu: Hiç ters dönmemiş ✅"
+                        
+                    msg = (
+                        f"🎯 <b>ANLIK TARAMA - GÜVENLİ BAHİS SİNYALİ</b>\n\n"
+                        f"📊 <b>{symbol} {direction}</b>\n"
+                        f"<b>Anlık Fiyat:</b> ${current_price:.2f} ({diff_pct:+.2f}%)\n"
+                        f"<b>Dünkü Kapanış:</b> ${ref_price:.2f}\n"
+                        f"<b>Kapanışa Kalan Süre:</b> {hours_left} saat {mins_left} dakika\n\n"
+                        f"📈 <b>Tarihsel Analiz (son 60 gün):</b>\n"
+                        f"{hist_str}\n\n"
+                    )
+                    
+                    if poly_price_str:
+                        msg += (
+                            f"💰 <b>Polymarket:</b> {poly_price_str}\n"
+                            f"💵 <b>Tavsiye:</b> {profit_str}\n"
+                            f"📦 <b>Emir Kitabı (CLOB):</b> {order_str}\n\n"
+                        )
+                        
+                    if slug_link:
+                        msg += f"🔗 <a href='{slug_link}'>Polymarket'te İşlem Yap ↗</a>\n"
+                        
+                    msg += (
+                        f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                        f"<b>{analysis.get('confidence_stars')} {analysis.get('confidence_label')}</b>"
+                    )
+                    
+                    # Send manual signal to Telegram
+                    await send_signal(msg)
+                    _signals_sent_today[key] = {
+                        "diff_pct": diff_pct,
+                        "time": now_ts
+                    }
+                    logger.info(f"Manual scan signal sent to Telegram: {symbol} {direction}")
+
             return {
                 "symbol": symbol,
                 "direction": direction,
@@ -1105,8 +1190,14 @@ async def run_manual_scan() -> list:
             logger.error(f"Error scanning single symbol {symbol} manually: {e}")
             return None
 
-    # Run in parallel using asyncio.gather
-    tasks = [scan_single_symbol(symbol) for symbol in SCAN_WATCHLIST]
+    # Run in parallel using asyncio.gather with concurrency control to prevent API rate limiting (429s)
+    sem = asyncio.Semaphore(3)
+    async def scan_single_symbol_sem(symbol):
+        async with sem:
+            await asyncio.sleep(0.05) # Tiny stagger to space out the parallel requests
+            return await scan_single_symbol(symbol)
+
+    tasks = [scan_single_symbol_sem(symbol) for symbol in SCAN_WATCHLIST]
     scanned_results = await asyncio.gather(*tasks)
 
     # Filter out None results
@@ -1129,6 +1220,10 @@ async def run_manual_scan() -> list:
         return (score, abs_diff)
 
     filtered_results.sort(key=sort_key, reverse=True)
+    
+    # Run WTI Closes Above scanner in background to send Level Alarms to Telegram if any safe bets are found
+    asyncio.create_task(scan_closes_above_markets(total_minutes))
+    
     return filtered_results
 
 
@@ -1250,6 +1345,18 @@ async def scan_closes_above_markets(total_minutes: int):
 
             profit_pct = ((1.0 - safe_price) / safe_price) * 100
             
+            # Deduplication guard: only send WTI Level Alarm if not sent in the last 10 minutes (600s)
+            key = (question, safe_outcome, "wti_closes_above")
+            now_ts = time_mod.time()
+            should_send = True
+            if key in _signals_sent_today:
+                prev = _signals_sent_today[key]
+                if now_ts - prev["time"] < 600:
+                    should_send = False
+            
+            if not should_send:
+                continue
+            
             # Format and send Telegram Alert!
             msg = (
                 f"🎯 <b>FINANS SCANNER - WTI SEVİYE ALARMI</b>\n\n"
@@ -1271,6 +1378,9 @@ async def scan_closes_above_markets(total_minutes: int):
             )
 
             await send_signal(msg)
+            _signals_sent_today[key] = {
+                "time": now_ts
+            }
             logger.info(f"WTI Closes Above signal sent: {question} -> {safe_outcome} at {safe_price}")
 
     except Exception as e:
