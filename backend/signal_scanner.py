@@ -41,11 +41,12 @@ SCAN_START_MINUTES = 900   # 15:00 ET
 SCAN_END_MINUTES = 1020     # 17:00 ET (24:00 TR) to cover commodities close
 SCAN_INTERVAL = 60         # Every 60 seconds
 
-# Stocks to scan
+# Stocks, commodities and indices to scan (complete 27-asset watchlist representing all Up/Down markets)
 SCAN_WATCHLIST = [
     "SPY", "PLTR", "TSLA", "NVDA", "AAPL", "AMZN", "META", "GOOGL",
     "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY", "OPEN",
-    "WTI", "XAU", "XAG"
+    "WTI", "XAU", "XAG", "HSI", "NG", "NKY", "UKX", "DIA", "DAX", 
+    "RUT", "NYA"
 ]
 
 # Slug → symbol mapping for Polymarket event discovery
@@ -86,6 +87,20 @@ SLUG_TO_SYMBOL = {
     "xagusd-up-or-down": "XAG",
     "xau-up-or-down": "XAU",
     "xag-up-or-down": "XAG",
+    "hsi-up-or-down": "HSI",
+    "hang-seng-up-or-down": "HSI",
+    "ng-up-or-down": "NG",
+    "natural-gas-up-or-down": "NG",
+    "nik-up-or-down": "NKY",
+    "nikkei-225-up-or-down": "NKY",
+    "ukx-up-or-down": "UKX",
+    "ftse-100-up-or-down": "UKX",
+    "djia-up-or-down": "DIA",
+    "dow-jones-up-or-down": "DIA",
+    "dax-up-or-down": "DAX",
+    "rut-up-or-down": "RUT",
+    "russell-2000-up-or-down": "RUT",
+    "nya-up-or-down": "NYA",
 }
 
 # ─── State ──────────────────────────────────────────────────────────────────
@@ -330,7 +345,7 @@ async def load_historical_data():
             loaded_count += 1
             logger.info(f"  {symbol}: {len(analysis_data)} trading days")
 
-            await asyncio.sleep(0.5)  # Rate-limit friendly
+            await asyncio.sleep(1.2)  # Rate-limit friendly
 
         except Exception as e:
             logger.error(f"Error loading history for {symbol}: {e}")
@@ -511,6 +526,21 @@ async def fetch_polymarket_events() -> dict:
                 slugs_to_try.append(f"xauusd-up-or-down-on-{month_name}-{day}-{year}")
             elif symbol == "XAG":
                 slugs_to_try.append(f"xagusd-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "HSI":
+                slugs_to_try.append(f"hang-seng-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "NG":
+                slugs_to_try.append(f"natural-gas-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "NKY":
+                slugs_to_try.append(f"nikkei-225-up-or-down-on-{month_name}-{day}-{year}")
+                slugs_to_try.append(f"nik-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "UKX":
+                slugs_to_try.append(f"ftse-100-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "DIA":
+                slugs_to_try.append(f"dow-jones-up-or-down-on-{month_name}-{day}-{year}")
+                slugs_to_try.append(f"djia-up-or-down-on-{month_name}-{day}-{year}")
+                slugs_to_try.append(f"dow-up-or-down-on-{month_name}-{day}-{year}")
+            elif symbol == "RUT":
+                slugs_to_try.append(f"russell-2000-up-or-down-on-{month_name}-{day}-{year}")
 
             async with httpx.AsyncClient() as client:
                 for s in slugs_to_try:
