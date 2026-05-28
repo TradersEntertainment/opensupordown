@@ -59,11 +59,12 @@ def draw_rounded_rect(draw, coords, radius, color, outline=None, width=1):
     """Draw a smooth rounded rectangle."""
     draw.rounded_rectangle(coords, radius=radius, fill=color, outline=outline, width=width)
 
-def generate_card_image(data: dict) -> bytes:
+def generate_card_image(data: dict, lang: str = "tr") -> bytes:
     """
     Generates a beautifully styled, high-res image of the asset opportunity card.
     Uses 2x supersampling (renders at 1200x1400, scales down to 600x700) for pristine anti-aliasing.
     Uses RGB mode with fully opaque panels to prevent blending issues on Telegram backgrounds.
+    Supports dynamic language translation ("tr" or "en").
     """
     # ── Configuration & Dimensions ──
     scale = 2  # Supersampling factor
@@ -98,8 +99,69 @@ def generate_card_image(data: dict) -> bytes:
     is_up = data.get("direction") == "UP"
     dir_color = green_accent if is_up else red_accent
     dir_bg = green_bg if is_up else red_bg
-    dir_text = "YUKARI" if is_up else "ASAGI"
+    diff_pct = data.get("diff_pct", 0.0)
+    diff_sign = "+" if diff_pct > 0 else ""
     
+    poly = data.get("poly", {})
+    
+    # ── Dynamic Language Translations ──
+    if lang == "en":
+        dir_text = "BUY UP" if is_up else "BUY DOWN"
+        t_change = f"Change vs Yesterday: {diff_sign}{diff_pct:.2f}%"
+        t_curr_price = "Current Pyth Price:"
+        t_ref_price = "Yesterday's Close:"
+        t_poly_board = "Polymarket Board:"
+        t_hist_title = "Historical Analysis (60 Days)"
+        t_rev_rate = "Reversal Rate:"
+        t_worst = "Worst Case Scenario:"
+        t_no_rev = "Never reversed"
+        t_clob_title = "ORDER BOOK"
+        t_clob_active = "ACTIVE DEPTH"
+        t_clob_empty = "NO ORDERS"
+        t_best_ask = "Best Ask (Price):"
+        t_ask_size = "Order Book Size:"
+        t_depth_99 = "Asks at 99c:"
+        t_no_orders = "No active CLOB sell orders"
+        
+        safe_outcome_price = poly.get("safe_outcome_price", 0.0)
+        if safe_outcome_price > 0:
+            profit_pct = ((1.0 - safe_outcome_price) / safe_outcome_price) * 100
+            rec_price = round(safe_outcome_price * 100)
+            t_advice = f"Advice: Buy {rec_price}c -> $1.00 ({profit_pct:.1f}% profit)"
+        else:
+            t_advice = ""
+        t_trade = "Trade Now ->"
+        t_badge_impos = "IMPOSSIBLE"
+        t_badge_99c = "99c ASK"
+    else:
+        dir_text = "YUKARI" if is_up else "ASAGI"
+        t_change = f"Dune Gore Degisim: {diff_sign}{diff_pct:.2f}%"
+        t_curr_price = "Anlık Pyth Fiyatı:"
+        t_ref_price = "Dünkü Kapanış:"
+        t_poly_board = "Polymarket Tahtası:"
+        t_hist_title = "Tarihsel Analiz (60 Gun)"
+        t_rev_rate = "Ters Donus Orani:"
+        t_worst = "En Kotu Senaryo:"
+        t_no_rev = "Ters donmedi"
+        t_clob_title = "EMIR KITABI"
+        t_clob_active = "ALIM AKTIF"
+        t_clob_empty = "EMIR YOK"
+        t_best_ask = "En Ucuz Teklif (Ask):"
+        t_ask_size = "Satis Emir Buyuklugu:"
+        t_depth_99 = "99c'daki Emirler:"
+        t_no_orders = "CLOB satis emri bulunmuyor"
+        
+        safe_outcome_price = poly.get("safe_outcome_price", 0.0)
+        if safe_outcome_price > 0:
+            profit_pct = ((1.0 - safe_outcome_price) / safe_outcome_price) * 100
+            rec_price = round(safe_outcome_price * 100)
+            t_advice = f"Tavsiye: {rec_price}c -> $1.00 (%{profit_pct:.1f} kar)"
+        else:
+            t_advice = ""
+        t_trade = "Islem Yap ->"
+        t_badge_impos = "IMKANSIZ"
+        t_badge_99c = "99c EMIR"
+        
     # Load fonts at 2x size
     f_reg, f_bold = get_fonts(13 * scale, 14 * scale)
     _, f_title = get_fonts(16 * scale, 24 * scale)      # 48px bold for Symbol
@@ -110,12 +172,10 @@ def generate_card_image(data: dict) -> bytes:
     draw_rounded_rect(draw, [15, 15, width-15, height-15], 16 * scale, bg_color, outline=card_border, width=2 * scale)
     
     # ── Top-Left Direction Pill ──
-    # Draw a rounded rect for the direction indicator
     pill_w = 80 * scale
     pill_h = 24 * scale
     pill_x, pill_y = 35 * scale, 40 * scale
     draw_rounded_rect(draw, [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h], 6 * scale, dir_bg, outline=dir_color, width=1 * scale)
-    # Direction Text (centered in pill)
     w_dir_text = draw.textlength(dir_text, font=f_badge)
     draw.text((pill_x + (pill_w - w_dir_text)/2, pill_y + 4 * scale), dir_text, font=f_badge, fill=dir_color)
     
@@ -133,8 +193,8 @@ def generate_card_image(data: dict) -> bytes:
         badge_h = 20 * scale
         badge_x -= badge_w
         draw_rounded_rect(draw, [badge_x, badge_y + 2*scale, badge_x + badge_w, badge_y + 2*scale + badge_h], 10 * scale, amber_accent)
-        w_badge_txt = draw.textlength("99c EMIR", font=f_badge)
-        draw.text((badge_x + (badge_w - w_badge_txt)/2, badge_y + 5 * scale), "99c EMIR", font=f_badge, fill=(0, 0, 0))
+        w_badge_txt = draw.textlength(t_badge_99c, font=f_badge)
+        draw.text((badge_x + (badge_w - w_badge_txt)/2, badge_y + 5 * scale), t_badge_99c, font=f_badge, fill=(0, 0, 0))
         badge_x -= 10 * scale  # Margin between badges
         
     # 2) İMKANSIZ Badge
@@ -143,35 +203,31 @@ def generate_card_image(data: dict) -> bytes:
         badge_h = 20 * scale
         badge_x -= badge_w
         draw_rounded_rect(draw, [badge_x, badge_y + 2*scale, badge_x + badge_w, badge_y + 2*scale + badge_h], 10 * scale, green_accent)
-        w_badge_txt = draw.textlength("IMKANSIZ", font=f_badge)
-        draw.text((badge_x + (badge_w - w_badge_txt)/2, badge_y + 5 * scale), "IMKANSIZ", font=f_badge, fill=(0, 0, 0))
+        w_badge_txt = draw.textlength(t_badge_impos, font=f_badge)
+        draw.text((badge_x + (badge_w - w_badge_txt)/2, badge_y + 5 * scale), t_badge_impos, font=f_badge, fill=(0, 0, 0))
         
     # ── Change vs Yesterday ──
-    diff_pct = data.get("diff_pct", 0.0)
-    diff_sign = "+" if diff_pct > 0 else ""
-    diff_str = f"Dune Gore Degisim: {diff_sign}{diff_pct:.2f}%"
-    draw.text((35 * scale, 80 * scale), diff_str, font=f_subtitle, fill=dir_color)
+    draw.text((35 * scale, 80 * scale), t_change, font=f_subtitle, fill=dir_color)
     
     # ── Prices List (Middle Section) ──
     y_cursor = 120 * scale
     line_spacing = 28 * scale
     
     # 1) Anlık Pyth Fiyatı
-    draw.text((35 * scale, y_cursor), "Anlık Pyth Fiyatı:", font=f_reg, fill=text_gray)
+    draw.text((35 * scale, y_cursor), t_curr_price, font=f_reg, fill=text_gray)
     curr_price_str = f"${data.get('current_price', 0.0):,.4f}"
     draw.text((width - 35 * scale - draw.textlength(curr_price_str, font=f_bold), y_cursor), curr_price_str, font=f_bold, fill=text_white)
     
     # 2) Dünkü Kapanış
     y_cursor += line_spacing
-    draw.text((35 * scale, y_cursor), "Dünkü Kapanış:", font=f_reg, fill=text_gray)
+    draw.text((35 * scale, y_cursor), t_ref_price, font=f_reg, fill=text_gray)
     ref_price_str = f"${data.get('ref_price', 0.0):,.4f}"
     draw.text((width - 35 * scale - draw.textlength(ref_price_str, font=f_bold), y_cursor), ref_price_str, font=f_bold, fill=text_white)
     
     # 3) Polymarket Tahtası
     y_cursor += line_spacing
-    draw.text((35 * scale, y_cursor), "Polymarket Tahtası:", font=f_reg, fill=text_gray)
+    draw.text((35 * scale, y_cursor), t_poly_board, font=f_reg, fill=text_gray)
     
-    poly = data.get("poly", {})
     if poly.get("slug"):
         up_c = f"U: {round(poly.get('up_price', 0.0) * 100)}c"
         down_c = f"D: {round(poly.get('down_price', 0.0) * 100)}c"
@@ -194,8 +250,9 @@ def generate_card_image(data: dict) -> bytes:
         rx -= w_up
         draw.text((rx, y_cursor), up_c, font=f_bold, fill=green_accent if is_up else text_white)
     else:
-        draw.text((width - 35 * scale - draw.textlength("Pazar Yok", font=f_reg), y_cursor), "Pazar Yok", font=f_reg, fill=text_gray)
-
+        no_market_str = "No Market" if lang == "en" else "Pazar Yok"
+        draw.text((width - 35 * scale - draw.textlength(no_market_str, font=f_reg), y_cursor), no_market_str, font=f_reg, fill=text_gray)
+ 
     # ─── Panel 1: Tarihsel Analiz (60 Gün) ───
     y_cursor += 38 * scale
     panel_h = 105 * scale
@@ -203,9 +260,9 @@ def generate_card_image(data: dict) -> bytes:
     
     # Header inside Panel
     p_cursor = y_cursor + 12 * scale
-    draw.text((50 * scale, p_cursor), "Tarihsel Analiz (60 Gun)", font=f_subtitle, fill=text_gray)
+    draw.text((50 * scale, p_cursor), t_hist_title, font=f_subtitle, fill=text_gray)
     
-    # Convert star emojis to standard filled star glyphs (★/☆) which are perfectly supported by Roboto
+    # Convert star emojis to standard filled star glyphs (★/☆)
     hist = data.get("historical", {})
     stars = hist.get("confidence_stars", "⭐")
     stars_count = stars.count("⭐")
@@ -217,11 +274,13 @@ def generate_card_image(data: dict) -> bytes:
     
     # Ters Dönüş Oranı
     p_cursor += 24 * scale
-    draw.text((50 * scale, p_cursor), "Ters Donus Orani:", font=f_reg, fill=text_gray)
+    draw.text((50 * scale, p_cursor), t_rev_rate, font=f_reg, fill=text_gray)
     rev_count = hist.get("reversed_count", 0)
     total_days = hist.get("total_similar_days", 0)
     rev_rate = hist.get("reversal_rate", 0.0)
-    rev_str = f"{rev_count}/{total_days} gun ({rev_rate:.1f}%)"
+    
+    days_word = "days" if lang == "en" else "gun"
+    rev_str = f"{rev_count}/{total_days} {days_word} ({rev_rate:.1f}%)"
     
     # Select color depending on risk
     rev_color = green_accent if rev_count == 0 else text_gold if rev_count == 1 else red_accent
@@ -229,9 +288,9 @@ def generate_card_image(data: dict) -> bytes:
     
     # En Kötü Senaryo
     p_cursor += 24 * scale
-    draw.text((50 * scale, p_cursor), "En Kotu Senaryo:", font=f_reg, fill=text_gray)
+    draw.text((50 * scale, p_cursor), t_worst, font=f_reg, fill=text_gray)
     worst = hist.get("worst_case", 0.0)
-    worst_str = f"%{worst:+.2f}" if worst != 0 else "Ters donmedi"
+    worst_str = f"%{worst:+.2f}" if worst != 0 else t_no_rev
     draw.text((width - 50 * scale - draw.textlength(worst_str, font=f_bold), p_cursor), worst_str, font=f_bold, fill=text_white)
     
     # ─── Panel 2: Emir Kitabı (CLOB) ───
@@ -245,10 +304,9 @@ def generate_card_image(data: dict) -> bytes:
     
     # Header inside Panel
     p2_cursor = y_cursor + 12 * scale
-    draw.text((50 * scale, p2_cursor), "EMIR KITABI", font=f_subtitle, fill=text_gold if data.get("has_orders_at_99") else text_gray)
+    draw.text((50 * scale, p2_cursor), t_clob_title, font=f_subtitle, fill=text_gold if data.get("has_orders_at_99") else text_gray)
     
-    # "ALIM AKTIF" or "EMIR YOK" badge (aligned right)
-    status_text = "ALIM AKTIF" if data.get("has_orders_at_99") else "EMIR YOK"
+    status_text = t_clob_active if data.get("has_orders_at_99") else t_clob_empty
     status_color = text_gold if data.get("has_orders_at_99") else text_gray
     draw.text((width - 50 * scale - draw.textlength(status_text, font=f_badge), p2_cursor + 2*scale), status_text, font=f_badge, fill=status_color)
     
@@ -256,45 +314,45 @@ def generate_card_image(data: dict) -> bytes:
     if poly.get("best_ask") is not None:
         # En Ucuz Teklif
         p2_cursor += 24 * scale
-        draw.text((50 * scale, p2_cursor), "En Ucuz Teklif (Ask):", font=f_reg, fill=text_gray)
+        draw.text((50 * scale, p2_cursor), t_best_ask, font=f_reg, fill=text_gray)
         ask_str = f"{round(poly.get('best_ask', 0.0) * 100)}c"
         draw.text((width - 50 * scale - draw.textlength(ask_str, font=f_bold), p2_cursor), ask_str, font=f_bold, fill=text_white)
         
         # Satış Emir Büyüklüğü
         p2_cursor += 24 * scale
-        draw.text((50 * scale, p2_cursor), "Satis Emir Buyuklugu:", font=f_reg, fill=text_gray)
+        draw.text((50 * scale, p2_cursor), t_ask_size, font=f_reg, fill=text_gray)
         size_str = f"${round(poly.get('depth_at_best', 0.0)):,}"
         draw.text((width - 50 * scale - draw.textlength(size_str, font=f_bold), p2_cursor), size_str, font=f_bold, fill=text_white)
         
         # 99c'daki Emirler
         p2_cursor += 24 * scale
-        draw.text((50 * scale, p2_cursor), "99c'daki Emirler:", font=f_bold, fill=text_gold if poly.get("depth_at_99", 0) > 0 else text_gray)
+        draw.text((50 * scale, p2_cursor), t_depth_99, font=f_bold, fill=text_gold if poly.get("depth_at_99", 0) > 0 else text_gray)
         depth_99_str = f"${round(poly.get('depth_at_99', 0.0)):,}"
         draw.text((width - 50 * scale - draw.textlength(depth_99_str, font=f_bold), p2_cursor), depth_99_str, font=f_bold, fill=text_gold if poly.get("depth_at_99", 0) > 0 else text_white)
     else:
         # No orders
         p2_cursor += 45 * scale
-        no_orders_str = "CLOB satis emri bulunmuyor"
-        draw.text((width/2 - draw.textlength(no_orders_str, font=f_reg)/2, p2_cursor), no_orders_str, font=f_reg, fill=text_gray)
-
+        draw.text((width/2 - draw.textlength(t_no_orders, font=f_reg)/2, p2_cursor), t_no_orders, font=f_reg, fill=text_gray)
+ 
     # ─── Footer: Tavsiye & İşlem Yap Link ───
     y_cursor = height - 55 * scale
     
     # 1) Tavsiye text (using standard -> ASCII arrow)
-    safe_outcome_price = poly.get("safe_outcome_price", 0.0)
-    if safe_outcome_price > 0:
-        profit_pct = ((1.0 - safe_outcome_price) / safe_outcome_price) * 100
-        rec_price = round(safe_outcome_price * 100)
-        advice_str = f"Tavsiye: {rec_price}c -> $1.00 (%{profit_pct:.1f} kar)"
-        draw.text((35 * scale, y_cursor), advice_str, font=f_subtitle, fill=text_white)
+    if t_advice:
+        draw.text((35 * scale, y_cursor), t_advice, font=f_subtitle, fill=text_white)
     
     # 2) "İşlem Yap" link on right (using standard -> ASCII arrow)
-    link_str = "Islem Yap ->"
-    draw.text((width - 35 * scale - draw.textlength(link_str, font=f_subtitle), y_cursor), link_str, font=f_subtitle, fill=(59, 130, 246))
+    draw.text((width - 35 * scale - draw.textlength(t_trade, font=f_subtitle), y_cursor), t_trade, font=f_subtitle, fill=(59, 130, 246))
     
     # ── Supersampling scale down ──
-    # Resize image down to original 600x700 with high-quality Lanczos resampling
     final_img = img.resize((600, 700), Image.Resampling.LANCZOS)
+    
+    # Convert PIL Image to bytes
+    byte_io = io.BytesIO()
+    final_img.save(byte_io, 'PNG')
+    byte_io.seek(0)
+    
+    return byte_io.getvalue()
     
     # Convert PIL Image to bytes
     byte_io = io.BytesIO()
