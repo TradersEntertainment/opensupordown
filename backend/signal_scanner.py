@@ -762,13 +762,32 @@ async def run_manual_scan() -> list:
     now_et = datetime.now(et_tz)
     total_minutes = now_et.hour * 60 + now_et.minute
 
-    # If weekend or after hours (before 9:30 AM or after 16:00 ET), default to 60 minutes to close
-    if now_et.weekday() >= 5 or total_minutes < 570 or total_minutes >= 960:
+    is_off_hours = False
+    off_hours_reason = ""
+
+    if now_et.weekday() >= 5:
+        # Weekend: US markets are closed. Default to 60 mins to close for testing
         minutes_to_close_val = 60
         is_off_hours = True
+        off_hours_reason = "Hafta sonu nedeniyle ABD piyasaları kapalıdır. Test edebilmeniz amacıyla analiz kapanışa 1 saat (60 dk) kala şeklinde simüle edilmiştir."
+    elif total_minutes < 570:
+        # Pre-market (before 9:30 AM ET): US markets are not open yet.
+        # Analyze risk for the entire trading day (360 minutes to close / opening candle).
+        minutes_to_close_val = 360
+        is_off_hours = True
+        off_hours_reason = "ABD piyasaları henüz açılmamıştır (Pre-market). Risk analizi tüm işlem gününü kapsayacak şekilde açılış mumu (360 dk kala) referans alınarak yapılmıştır."
+    elif total_minutes >= 960:
+        # After-hours (after 4:00 PM ET): US markets are closed.
+        # Default to 60 mins to close for testing
+        minutes_to_close_val = 60
+        is_off_hours = True
+        off_hours_reason = "ABD piyasaları kapanmıştır. Test edebilmeniz amacıyla analiz kapanışa 1 saat (60 dk) kala şeklinde simüle edilmiştir."
     else:
+        # Regular trading hours
         minutes_to_close_val = max(0, 960 - total_minutes)
         is_off_hours = False
+        off_hours_reason = ""
+
 
     # 2. Fetch Polymarket active events
     poly_data = await fetch_polymarket_events()
@@ -845,6 +864,7 @@ async def run_manual_scan() -> list:
                 "diff_pct": diff_pct,
                 "minutes_to_close": minutes_to_close_val,
                 "is_off_hours": is_off_hours,
+                "off_hours_reason": off_hours_reason,
                 "historical": {
                     "total_similar_days": analysis.get("total_similar_days", 0),
                     "reversed_count": analysis.get("reversed_count", 0),

@@ -60,6 +60,7 @@ interface ScanResult {
   diff_pct: number;
   minutes_to_close: number;
   is_off_hours: boolean;
+  off_hours_reason: string;
   historical: {
     total_similar_days: number;
     reversed_count: number;
@@ -512,7 +513,7 @@ function App() {
               <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 flex gap-3 items-center">
                 <span className="text-amber-400 text-xl font-bold shrink-0">⚠️</span>
                 <p className="text-xs text-amber-300">
-                  <strong>Piyasa saatleri dışındasınız:</strong> ABD piyasaları kapalı veya henüz açılmamıştır. Tarihsel risk analizi, test edebilmeniz amacıyla varsayılan olarak <strong>kapanışa 1 saat (60 dk) kala</strong> şeklinde simüle edilmiştir.
+                  <strong>Piyasa saatleri dışındasınız:</strong> {scanResults[0]?.off_hours_reason || "ABD piyasaları kapalı veya henüz açılmamıştır."}
                 </p>
               </div>
             )}
