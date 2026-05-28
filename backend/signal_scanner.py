@@ -249,18 +249,14 @@ async def send_english_delayed_task(card_data: dict, scan_type: str):
         worst = hist.get("worst_case", 0.0)
         worst_case_desc = f"{worst:+.2f}%" if worst != 0 else "Never reversed"
         
-        # Polymarket Pricing
+        # Polymarket Pricing (No orderbook details for the free channel)
         poly_price_str = ""
         profit_str = ""
-        order_str = ""
         slug_link = ""
         
         up_p = poly.get("up_price", 0.0)
         down_p = poly.get("down_price", 0.0)
         safe_price = poly.get("safe_outcome_price", 0.0)
-        best_ask = poly.get("best_ask")
-        total_size = poly.get("depth_at_best", 0.0)
-        depth_at_99 = poly.get("depth_at_99", 0.0)
         slug = poly.get("slug", "")
         
         if slug:
@@ -271,14 +267,7 @@ async def send_english_delayed_task(card_data: dict, scan_type: str):
                 profit_pct = ((1.0 - safe_price) / safe_price) * 100
                 profit_str = f"Buy <b>{direction}</b> ({safe_price*100:.0f}¢ ➔ $1.00 = {profit_pct:.1f}% expected yield)"
                 
-            if best_ask is not None:
-                order_str = f"{best_ask*100:.0f}¢ price for up to ${total_size:,.0f} size"
-                if depth_at_99 > 0:
-                    order_str += f" (${depth_at_99:,.0f} active asks at 99¢)"
-            else:
-                order_str = "No sell orders on CLOB"
-                
-        # Format the English Telegram message
+        # Format the English Telegram message (Cleaned: no CLOB Order Book)
         title_prefix = "🎯 <b>SAFE BET SIGNAL (15-MIN DELAYED)</b>"
         if scan_type == "hourly":
             title_prefix = "🎯 <b>HOURLY SCANNER - SAFE BET SIGNAL (15-MIN DELAYED)</b>"
@@ -299,19 +288,28 @@ async def send_english_delayed_task(card_data: dict, scan_type: str):
         if poly_price_str:
             msg_en += (
                 f"💰 <b>Polymarket:</b> {poly_price_str}\n"
-                f"💵 <b>Recommendation:</b> {profit_str}\n"
-                f"📦 <b>CLOB Order Book:</b> {order_str}\n\n"
+                f"💵 <b>Recommendation:</b> {profit_str}\n\n"
             )
             
         if slug_link:
-            msg_en += f"🔗 <a href='{slug_link}'>Trade on Polymarket ↗</a>\n"
+            msg_en += f"🔗 <a href='{slug_link}'>Trade on Polymarket ↗</a>\n\n"
             
         msg_en += (
             f"<b>{hist.get('confidence_stars')} {confidence_label_en}</b>"
         )
         
-        # Render the English card image
-        photo_bytes_en = image_generator.generate_card_image(card_data, lang="en")
+        # Strip out order book details for the free channel image
+        card_data_en = dict(card_data)
+        card_data_en["has_orders_at_99"] = False
+        if "poly" in card_data_en:
+            card_data_en["poly"] = dict(card_data_en["poly"])
+            card_data_en["poly"]["best_ask"] = None
+            card_data_en["poly"]["depth_at_best"] = 0.0
+            card_data_en["poly"]["depth_at_99"] = 0.0
+            card_data_en["poly"]["has_orders_at_99"] = False
+            
+        # Render the English card image (Cleaned)
+        photo_bytes_en = image_generator.generate_card_image(card_data_en, lang="en")
         
         # Send delayed signal to English Telegram channel
         if not _signal_bot or not ENGLISH_SIGNAL_CHAT_ID:
@@ -331,73 +329,6 @@ async def send_english_delayed_task(card_data: dict, scan_type: str):
         
     except Exception as e:
         logger.error(f"Failed to send delayed English signal: {e}")
-
-async def send_delayed_wti_alarm_task(wti_data: dict):
-    """Wait 15 minutes, then send the English version of the WTI Level Alarm."""
-    logger.info("Scheduled delayed English WTI Level Alarm in 15 minutes...")
-    await asyncio.sleep(900)  # 15 minutes delay
-    
-    try:
-        question = wti_data["question"]
-        current_wti = wti_data["current_wti"]
-        threshold = wti_data["threshold"]
-        move_desc = wti_data["move_desc"]
-        hours_left = wti_data["hours_left"]
-        mins_left = wti_data["mins_left"]
-        analysis = wti_data["analysis"]
-        safe_outcome = wti_data["safe_outcome"]
-        safe_price = wti_data["safe_price"]
-        profit_pct = wti_data["profit_pct"]
-        order_str = wti_data["order_str"]
-        slug = wti_data["slug"]
-        
-        # Translate confidence label
-        tr_label = analysis.get("confidence_label", "VERİ YOK")
-        label_map = {
-            "ÇOK GÜVENLİ": "VERY SAFE",
-            "GÜVENLİ": "SAFE",
-            "ORTA": "MODERATE",
-            "RİSKLİ": "RISKY",
-            "TEHLİKELİ": "DANGEROUS",
-            "VERİ YOK": "NO DATA"
-        }
-        confidence_label_en = label_map.get(tr_label, tr_label)
-        
-        reversal_rate = analysis.get("reversal_rate", 0.0)
-        reversed_count = analysis.get("reversed_count", 0)
-        total_similar_days = analysis.get("total_similar_days", 0)
-        max_reversal_move = analysis.get("max_reversal_move", "none")
-        
-        msg_en = (
-            f"🎯 <b>WTI LEVEL ALARM (15-MIN DELAYED)</b>\n\n"
-            f"📊 <b>WTI Crude Oil Close Target</b>\n"
-            f"<b>Question:</b> {question}\n"
-            f"<b>WTI Current Price:</b> ${current_wti:.2f}\n"
-            f"<b>Target Level:</b> ${threshold:.2f}\n"
-            f"<b>Required Move Distance:</b> {move_desc}\n"
-            f"<b>Time to Close:</b> {hours_left}h {mins_left}m\n\n"
-            f"📈 <b>Historical Analysis (Last 60 Days):</b>\n"
-            f"• WTI moved {move_desc} in the opposite direction <b>{reversed_count}/{total_similar_days} times</b> in this timeframe (Probability: {reversal_rate:.1f}%)\n"
-            f"• Largest opposite move: {max_reversal_move}\n\n"
-            f"💰 <b>Polymarket Safe Outcome:</b> '{safe_outcome}' ({safe_price*100:.1f}¢ ➔ $1.00 = {profit_pct:.1f}% expected yield)\n"
-            f"📦 <b>CLOB Order Book:</b> {order_str}\n\n"
-            f"🔗 <a href='https://polymarket.com/event/{slug}'>Trade on Polymarket ↗</a>\n\n"
-            f"<b>{analysis.get('confidence_stars')} {confidence_label_en}</b>"
-        )
-        
-        if not _signal_bot or not ENGLISH_SIGNAL_CHAT_ID:
-            logger.warning("English Telegram Bot/Channel not configured.")
-            return
-            
-        await _signal_bot.send_message(
-            chat_id=ENGLISH_SIGNAL_CHAT_ID,
-            text=msg_en,
-            parse_mode="HTML"
-        )
-        logger.info(f"Delayed English WTI Level Alarm successfully sent to {ENGLISH_SIGNAL_CHAT_ID}!")
-        
-    except Exception as e:
-        logger.error(f"Failed to send delayed English WTI Level Alarm: {e}")
 
 
 # ─── Historical Data Loading ───────────────────────────────────────────────
@@ -1001,9 +932,6 @@ async def scan_for_signals():
                 "was_safe": True,
             }
             logger.info(f"Signal sent: {symbol} {direction} ({diff_pct:+.2f}%)")
-            
-            # Schedule delayed English signal for public channel
-            asyncio.create_task(send_english_delayed_task(card_data, "auto"))
 
         except Exception as e:
             logger.error(f"Error scanning {symbol}: {e}")
@@ -1525,9 +1453,6 @@ async def run_manual_scan() -> list:
                         "was_safe": True
                     }
                     logger.info(f"Manual scan signal sent to Telegram: {symbol} {direction}")
-                    
-                    # Schedule delayed English signal for public channel
-                    asyncio.create_task(send_english_delayed_task(card_data, "manual"))
 
             return {
                 "symbol": symbol,
@@ -1755,23 +1680,6 @@ async def scan_closes_above_markets(total_minutes: int):
                 "time": now_ts
             }
             logger.info(f"WTI Closes Above signal sent: {question} -> {safe_outcome} at {safe_price}")
-            
-            # Schedule delayed English WTI Level Alarm
-            wti_data = {
-                "question": question,
-                "current_wti": current_wti,
-                "threshold": threshold,
-                "move_desc": move_desc,
-                "hours_left": hours_left,
-                "mins_left": mins_left,
-                "analysis": analysis,
-                "safe_outcome": safe_outcome,
-                "safe_price": safe_price,
-                "profit_pct": profit_pct,
-                "order_str": order_str,
-                "slug": slug
-            }
-            asyncio.create_task(send_delayed_wti_alarm_task(wti_data))
 
     except Exception as e:
         logger.error(f"Error scanning WTI Closes Above markets: {e}")
