@@ -232,13 +232,29 @@ async def load_historical_data():
                 "to": to_ts,
             }
 
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, params=params, timeout=15.0)
-                resp.raise_for_status()
-                data = resp.json()
+            # Retry up to 3 times in case of rate limits/network errors
+            retries = 3
+            data = None
+            for attempt in range(retries):
+                try:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.get(url, params=params, timeout=15.0)
+                        if resp.status_code == 429:
+                            logger.warning(f"Rate limited (429) loading history for {symbol}, retrying in 3.0s... (Attempt {attempt+1}/{retries})")
+                            await asyncio.sleep(3.0)
+                            continue
+                        resp.raise_for_status()
+                        data = resp.json()
+                        break
+                except Exception as ex:
+                    if attempt < retries - 1:
+                        logger.warning(f"Error loading history for {symbol} (Attempt {attempt+1}/{retries}): {ex}. Retrying in 3.0s...")
+                        await asyncio.sleep(3.0)
+                    else:
+                        raise ex
 
-            if data.get("s") != "ok" or "t" not in data:
-                logger.warning(f"No history for {symbol}: {data.get('s')}")
+            if not data or data.get("s") != "ok" or "t" not in data:
+                logger.warning(f"No history for {symbol}: {data.get('s') if data else 'No Data'}")
                 continue
 
             timestamps = data["t"]
@@ -314,7 +330,7 @@ async def load_historical_data():
             loaded_count += 1
             logger.info(f"  {symbol}: {len(analysis_data)} trading days")
 
-            await asyncio.sleep(0.15)  # Rate-limit friendly
+            await asyncio.sleep(0.5)  # Rate-limit friendly
 
         except Exception as e:
             logger.error(f"Error loading history for {symbol}: {e}")
