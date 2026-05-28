@@ -692,19 +692,6 @@ async def scan_for_signals():
             analysis = analyze_reversal_risk(symbol, diff_pct, minutes_to_close)
 
             if not analysis.get("is_safe_bet"):
-                # Warn if a previous signal degraded
-                key = (symbol, direction)
-                if key in _signals_sent_today and _signals_sent_today[key].get("was_safe"):
-                    warn = (
-                        f"🚨 <b>SİNYAL TEHLİKEDE: {symbol}</b>\n\n"
-                        f"<b>Önceki:</b> %{_signals_sent_today[key]['diff_pct']:+.2f}\n"
-                        f"<b>Şimdi:</b> %{diff_pct:+.2f}\n"
-                        f"<b>Anlık:</b> ${current_price:.2f}\n"
-                        f"<b>Kapanışa:</b> {minutes_to_close}dk\n"
-                        f"⚠️ Güven düşürüldü — dikkat!"
-                    )
-                    await send_signal(warn)
-                    _signals_sent_today[key]["was_safe"] = False
                 continue
 
             # ── Polymarket info ──
@@ -774,33 +761,7 @@ async def scan_for_signals():
             now_ts = time_mod.time()
 
             if key in _signals_sent_today:
-                prev = _signals_sent_today[key]
-                # Send update only if diff changed ≥0.3% or 10+ min passed
-                if (
-                    abs(abs_diff - abs(prev["diff_pct"])) < 0.3
-                    and now_ts - prev["time"] < 600
-                ):
-                    continue
-
-                # ── UPDATE signal ──
-                update_msg = (
-                    f"🔄 <b>SİNYAL GÜNCELLEMESİ: {symbol} {direction}</b>\n\n"
-                    f"<b>Önceki:</b> %{prev['diff_pct']:+.2f} → "
-                    f"<b>Şimdi:</b> %{diff_pct:+.2f}\n"
-                    f"<b>Anlık:</b> ${current_price:.2f}\n"
-                    f"<b>Kapanışa:</b> {minutes_to_close}dk"
-                    f"{poly_price_str}{order_str}\n"
-                    f"<b>Güven:</b> {analysis['confidence_stars']} hâlâ geçerli"
-                )
-                if photo_bytes:
-                    await send_signal_with_photo(update_msg, photo_bytes)
-                else:
-                    await send_signal(update_msg)
-                _signals_sent_today[key] = {
-                    "diff_pct": diff_pct,
-                    "time": now_ts,
-                    "was_safe": True,
-                }
+                # Already sent a signal for this symbol and direction today. Skip to avoid duplicates on Telegram.
                 continue
 
             # ── NEW SIGNAL ──
@@ -1017,6 +978,11 @@ async def run_hourly_scan(total_minutes: int):
             if not (is_impossible or is_safe_bet):
                 continue
 
+            # Skip if we already sent a Telegram signal for this asset today to avoid duplicates
+            key = (symbol, direction)
+            if key in _signals_sent_today:
+                continue
+
             # Fetch Polymarket pricing + orderbook depth
             poly_price_str = ""
             order_str = ""
@@ -1117,6 +1083,13 @@ async def run_hourly_scan(total_minutes: int):
                 await send_signal_with_photo(msg, photo_bytes)
             else:
                 await send_signal(msg)
+            
+            # Register in sent list to prevent duplicate alerts today
+            _signals_sent_today[key] = {
+                "diff_pct": diff_pct,
+                "time": time_mod.time(),
+                "was_safe": True,
+            }
             logger.info(f"Hourly signal sent to Telegram: {symbol} {direction}")
 
         except Exception as e:
@@ -1258,15 +1231,13 @@ async def run_manual_scan() -> list:
 
             # If the opportunity is safe/impossible, let's send a Telegram signal if not sent recently
             if is_impossible or is_safe_bet:
-                key = (symbol, direction, "manual")
+                key = (symbol, direction)
                 now_ts = time_mod.time()
                 should_send = True
                 
-                # Deduplication guard: only send if not sent in the last 5 minutes AND diff changed < 0.3%
+                # Deduplication guard: only send if not sent today to prevent duplicate alerts
                 if key in _signals_sent_today:
-                    prev = _signals_sent_today[key]
-                    if now_ts - prev["time"] < 300 and abs(abs(diff_pct) - abs(prev["diff_pct"])) < 0.3:
-                        should_send = False
+                    should_send = False
                 
                 if should_send:
                     # Construct manual signal Telegram message
@@ -1354,7 +1325,8 @@ async def run_manual_scan() -> list:
 
                     _signals_sent_today[key] = {
                         "diff_pct": diff_pct,
-                        "time": now_ts
+                        "time": now_ts,
+                        "was_safe": True
                     }
                     logger.info(f"Manual scan signal sent to Telegram: {symbol} {direction}")
 
@@ -1548,14 +1520,11 @@ async def scan_closes_above_markets(total_minutes: int):
 
             profit_pct = ((1.0 - safe_price) / safe_price) * 100
             
-            # Deduplication guard: only send WTI Level Alarm if not sent in the last 10 minutes (600s)
+            # Deduplication guard: only send WTI Level Alarm once per day to prevent spam
             key = (question, safe_outcome, "wti_closes_above")
-            now_ts = time_mod.time()
             should_send = True
             if key in _signals_sent_today:
-                prev = _signals_sent_today[key]
-                if now_ts - prev["time"] < 600:
-                    should_send = False
+                should_send = False
             
             if not should_send:
                 continue
