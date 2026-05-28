@@ -6,4 +6,3 @@ __pycache__/
 *.db
 venv/
 .DS_Store
-backend/fonts/
