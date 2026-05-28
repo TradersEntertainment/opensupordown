@@ -151,3 +151,13 @@ async def create_position(req: PositionCreate):
 async def delete_position(position_id: int):
     await database.delete_position(position_id)
     return {"message": "Pozisyon silindi."}
+
+
+@app.get("/api/scan-now")
+async def run_scan_now():
+    try:
+        results = await signal_scanner.run_manual_scan()
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

@@ -745,3 +745,155 @@ def minutes_to_close(total_minutes: int) -> int:
 def start_signal_scanner():
     """Start the signal scanner background task."""
     asyncio.create_task(signal_scanner_loop())
+
+
+async def run_manual_scan() -> list:
+    """
+    Run an on-demand scan of all watchlist stocks and return their detailed status,
+    historical risk analysis, and Polymarket orderbook details.
+    """
+    global _historical_cache, _cache_loaded
+
+    # 1. Load history if not loaded yet
+    if not _cache_loaded:
+        await load_historical_data()
+
+    et_tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et_tz)
+    total_minutes = now_et.hour * 60 + now_et.minute
+
+    # If weekend or after hours (before 9:30 AM or after 16:00 ET), default to 60 minutes to close
+    if now_et.weekday() >= 5 or total_minutes < 570 or total_minutes >= 960:
+        minutes_to_close_val = 60
+        is_off_hours = True
+    else:
+        minutes_to_close_val = max(0, 960 - total_minutes)
+        is_off_hours = False
+
+    # 2. Fetch Polymarket active events
+    poly_data = await fetch_polymarket_events()
+
+    async def scan_single_symbol(symbol: str) -> dict:
+        try:
+            pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
+            if not pyth_id:
+                return None
+
+            current_price = await pyth_client.get_active_price(symbol, pyth_id)
+            if not current_price:
+                return None
+
+            from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+            ref_price = await pyth_client.get_historical_candle_price(
+                full_symbol, pyth_id, from_ts, to_ts, price_type="close"
+            )
+            if not ref_price or ref_price == 0:
+                return None
+
+            diff_pct = ((current_price - ref_price) / ref_price) * 100
+            direction = "UP" if diff_pct > 0 else "DOWN"
+
+            # Reversal analysis
+            analysis = analyze_reversal_risk(symbol, diff_pct, minutes_to_close_val)
+
+            # Polymarket details
+            up_price = 0.0
+            down_price = 0.0
+            safe_price = 0.0
+            poly_slug = ""
+            best_cheap_price = None
+            total_cheap_size = 0.0
+            depth_at_99 = 0.0
+            has_orders_at_99 = False
+
+            poly_info = poly_data.get(symbol)
+            if poly_info:
+                up_price = poly_info.get("up_price", 0.0)
+                down_price = poly_info.get("down_price", 0.0)
+                poly_slug = poly_info.get("slug", "")
+                safe_price = up_price if direction == "UP" else down_price
+                safe_token = (
+                    poly_info.get("up_token_id")
+                    if direction == "UP"
+                    else poly_info.get("down_token_id")
+                )
+
+                if safe_token:
+                    book = await fetch_orderbook_depth(safe_token)
+                    
+                    # Look for asks between 90c and 99c
+                    cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+                    if cheap_asks:
+                        best_cheap_price = min(cheap_asks.keys())
+                        total_cheap_size = sum(cheap_asks.values())
+                        
+                    # Specifically depth at 99c
+                    depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+                    has_orders_at_99 = depth_at_99 > 0 or (best_cheap_price is not None and best_cheap_price <= 0.99 and total_cheap_size > 0)
+
+            # A bet is "impossible" if historical reversal count <= 1 and we have at least 2 similar days
+            is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
+
+            # Let's count it as a "safe bet" if it is marked as safe in analysis
+            is_safe_bet = analysis.get("is_safe_bet", False)
+
+            return {
+                "symbol": symbol,
+                "direction": direction,
+                "current_price": current_price,
+                "ref_price": ref_price,
+                "diff_pct": diff_pct,
+                "minutes_to_close": minutes_to_close_val,
+                "is_off_hours": is_off_hours,
+                "historical": {
+                    "total_similar_days": analysis.get("total_similar_days", 0),
+                    "reversed_count": analysis.get("reversed_count", 0),
+                    "reversal_rate": analysis.get("reversal_rate", 100.0),
+                    "worst_case": analysis.get("worst_case", 0.0),
+                    "confidence_stars": analysis.get("confidence_stars", "❓"),
+                    "confidence_label": analysis.get("confidence_label", "VERİ YOK"),
+                },
+                "poly": {
+                    "slug": poly_slug,
+                    "up_price": up_price,
+                    "down_price": down_price,
+                    "safe_outcome_price": safe_price,
+                    "best_ask": best_cheap_price,
+                    "depth_at_best": total_cheap_size if best_cheap_price else 0.0,
+                    "depth_at_99": depth_at_99,
+                    "has_orders_at_99": has_orders_at_99
+                },
+                "is_safe_bet": is_safe_bet,
+                "is_impossible": is_impossible,
+                "has_orders_at_99": has_orders_at_99
+            }
+        except Exception as e:
+            logger.error(f"Error scanning single symbol {symbol} manually: {e}")
+            return None
+
+    # Run in parallel using asyncio.gather
+    tasks = [scan_single_symbol(symbol) for symbol in SCAN_WATCHLIST]
+    scanned_results = await asyncio.gather(*tasks)
+
+    # Filter out None results
+    filtered_results = [r for r in scanned_results if r is not None]
+    
+    # Sort: put "impossible" / "safe bets" with orders at 99c at the very top,
+    # then other safe bets, then sorting by diff_pct descending
+    def sort_key(item):
+        is_safe = item["is_safe_bet"]
+        is_imp = item["is_impossible"]
+        has_99 = item["poly"]["has_orders_at_99"]
+        abs_diff = abs(item["diff_pct"])
+        
+        score = 0
+        if is_safe or is_imp:
+            score += 1000
+        if has_99:
+            score += 500
+        
+        return (score, abs_diff)
+
+    filtered_results.sort(key=sort_key, reverse=True)
+    return filtered_results
+
