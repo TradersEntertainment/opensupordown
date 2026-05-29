@@ -79,7 +79,8 @@ async def get_positions():
         if current_price:
             ref = p['ref_price']
             p['diff_pct'] = ((current_price - ref) / ref) * 100
-            p['is_winning'] = (p['direction'] == 'UP' and current_price > ref) or (p['direction'] == 'DOWN' and current_price < ref)
+            is_up_bet = 'UP' in p['direction'] or 'YES' in p['direction']
+            p['is_winning'] = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
             
     return positions
 

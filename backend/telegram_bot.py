@@ -132,7 +132,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         diff_pct = ((current_price - ref) / ref) * 100
         
         # db stores OPEN_UP, OPEN_DOWN, UP, DOWN
-        is_up_bet = 'UP' in p['direction']
+        is_up_bet = 'UP' in p['direction'] or 'YES' in p['direction']
         is_winning = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
         icon = "🟢" if is_winning else "🔴"
         

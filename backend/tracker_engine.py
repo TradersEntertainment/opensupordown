@@ -79,7 +79,7 @@ async def _check_auto_expire(positions):
             ref = p['ref_price']
             is_win = False
             if current_price:
-                is_up_bet = 'UP' in p['direction']
+                is_up_bet = 'UP' in p['direction'] or 'YES' in p['direction']
                 is_win = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
 
             result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
@@ -140,7 +140,7 @@ async def _send_closing_summary(positions):
         
         ref = p['ref_price']
         diff_pct = ((current_price - ref) / ref) * 100
-        is_up_bet = 'UP' in p['direction']
+        is_up_bet = 'UP' in p['direction'] or 'YES' in p['direction']
         is_winning = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
         
         symbol = p['symbol']
@@ -554,7 +554,7 @@ async def check_prices_loop():
                         await database.update_warning_distance(p['id'], current_threshold)
 
                         direction = p['direction']
-                        is_up_bet = 'UP' in direction
+                        is_up_bet = 'UP' in direction or 'YES' in direction
                         is_losing = (is_up_bet and current_price <= ref) or (not is_up_bet and current_price >= ref)
 
                         status_word = "KAYBEDİYOR 🔴" if is_losing else "KAZANIYOR 🟢"

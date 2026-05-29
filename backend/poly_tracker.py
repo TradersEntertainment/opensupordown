@@ -74,6 +74,63 @@ def _match_slug_to_symbol(slug: str):
     return None, None
 
 
+def _parse_binary_market(slug: str, title: str, outcome: str):
+    """
+    Parses a binary market (Yes/No) like 'WTI Closes Above $80.00' or 'PLTR Closes Above $22'
+    Returns: (symbol, direction, ref_price, bet_type) or (None, None, None, None)
+    """
+    slug_lower = slug.lower()
+    title_lower = title.lower()
+    outcome_upper = outcome.upper()
+    
+    # 1. Check if it's a binary market (outcomes should be YES or NO)
+    if outcome_upper not in ('YES', 'NO'):
+        return None, None, None, None
+        
+    # 2. Check if it's a closes-above / closes-below / hit market
+    is_binary = any(kw in slug_lower or kw in title_lower for kw in ('closes-above', 'closes-below', 'hit', 'close above', 'close below'))
+    if not is_binary:
+        return None, None, None, None
+        
+    # 3. Identify the symbol
+    symbol = None
+    for slug_key, (sym, _) in SLUG_SYMBOL_MAP.items():
+        # Get the asset name token (e.g. 'pltr' from 'pltr-up-or-down')
+        prefix = slug_key.split('-')[0]
+        if prefix in slug_lower:
+            symbol = sym
+            break
+            
+    if not symbol:
+        return None, None, None, None
+        
+    # 4. Extract target price (ref_price) from title or slug
+    # Matches 'above $80.00', 'below 75.5', 'hit 80'
+    match = re.search(r"(?:above|below|hit)\s+\$?([\d\.]+)", title_lower)
+    if not match:
+        match = re.search(r"(?:above|below|hit)-([\d\.]+)", slug_lower)
+        
+    if not match:
+        return None, None, None, None
+        
+    ref_price = float(match.group(1))
+    
+    # 5. Determine direction (YES or NO)
+    # YES on Closes Above: win if price > threshold (UP-like)
+    # NO on Closes Above: win if price < threshold (DOWN-like)
+    # YES on Closes Below: win if price < threshold (DOWN-like, so we map to NO)
+    # NO on Closes Below: win if price > threshold (UP-like, so we map to YES)
+    is_below_market = 'below' in slug_lower or 'below' in title_lower
+    
+    if is_below_market:
+        direction = 'NO' if outcome_upper == 'YES' else 'YES'
+    else:
+        direction = outcome_upper
+        
+    return symbol, direction, ref_price, 'close'
+
+
+
 async def fetch_wallet_positions():
     """Fetch all positions for the tracked wallet from Polymarket Data API."""
     try:
@@ -90,7 +147,7 @@ async def fetch_wallet_positions():
         return []
 
 
-async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, title: str):
+async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, title: str, ref_price: float = None):
     """Resolves price and adds position to our tracking system."""
     pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
     if not pyth_id:
@@ -98,16 +155,20 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
         return False
     
     # Get reference price
-    if bet_type == 'close':
-        from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
-        ref_price = await pyth_client.get_historical_candle_price(
-            full_symbol, pyth_id, from_ts, to_ts, price_type='close'
-        )
+    if ref_price is None:
+        if bet_type == 'close':
+            from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+            ref_price = await pyth_client.get_historical_candle_price(
+                full_symbol, pyth_id, from_ts, to_ts, price_type='close'
+            )
+        else:
+            from_ts, to_ts = pyth_client.get_previous_open_times(symbol)
+            ref_price = await pyth_client.get_historical_candle_price(
+                full_symbol, pyth_id, from_ts, to_ts, price_type='open'
+            )
     else:
-        from_ts, to_ts = pyth_client.get_previous_open_times(symbol)
-        ref_price = await pyth_client.get_historical_candle_price(
-            full_symbol, pyth_id, from_ts, to_ts, price_type='open'
-        )
+        import time
+        to_ts = int(time.time())
     
     if ref_price is None:
         logger.warning(f"Could not get reference price for {symbol}, skipping auto-track")
@@ -132,8 +193,9 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
     if current_price:
         diff_pct = ((current_price - ref_price) / ref_price) * 100
     
-    is_winning = (direction == 'UP' and current_price and current_price > ref_price) or \
-                 (direction == 'DOWN' and current_price and current_price < ref_price)
+    is_up_bet = direction in ('UP', 'YES')
+    is_winning = (is_up_bet and current_price and current_price > ref_price) or \
+                 (not is_up_bet and current_price and current_price < ref_price)
     status = "KAZANIYOR 🟢" if is_winning else "KAYBEDİYOR 🔴"
     current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
     
@@ -189,15 +251,23 @@ async def sync_positions_loop():
                     continue
                 
                 slug = pos.get('eventSlug', '') or pos.get('slug', '')
-                outcome = pos.get('outcome', '')  # "Up" or "Down"
+                outcome = pos.get('outcome', '')  # "Up", "Down", "Yes", "No"
+                title = pos.get('title', slug)
                 
-                # Try to match the slug to our known markets
+                # 1. Try to match standard Up/Down markets
                 symbol, bet_type = _match_slug_to_symbol(slug)
-                if not symbol:
-                    continue
+                ref_price_val = None
                 
-                direction = outcome.upper()  # "Up" -> "UP", "Down" -> "DOWN"
-                if direction not in ('UP', 'DOWN'):
+                if symbol:
+                    direction = outcome.upper()  # "Up" -> "UP", "Down" -> "DOWN"
+                    if direction not in ('UP', 'DOWN'):
+                        symbol = None # Reset to try binary market parsing instead
+                
+                # 2. Try to match binary markets (Yes/No)
+                if not symbol:
+                    symbol, direction, ref_price_val, bet_type = _parse_binary_market(slug, title, outcome)
+                    
+                if not symbol:
                     continue
                     
                 db_direction = f"OPEN_{direction}" if bet_type == 'open' else direction
@@ -207,8 +277,7 @@ async def sync_positions_loop():
                     continue
                 
                 logger.info(f"Auto-tracking new position: {symbol} {db_direction} from Polymarket")
-                title = pos.get('title', slug)
-                await _add_position_from_poly(symbol, direction, bet_type, title)
+                await _add_position_from_poly(symbol, direction, bet_type, title, ref_price=ref_price_val)
                 
         except Exception as e:
             logger.error(f"Error in poly sync loop: {e}")
