@@ -271,10 +271,18 @@ async def sync_positions_loop():
                 if pos.get('redeemable', False):
                     continue
                     
-                # Only today's bets
+                # Only today's bets, or weekly/monthly bets that end within the next 31 days
                 end_date = pos.get('endDate', '')
                 if end_date != today_str:
-                    continue
+                    try:
+                        # Allow weekly/monthly bets that end in the next 31 days
+                        end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+                        today_dt = datetime.now(pytz.timezone('US/Eastern')).date()
+                        days_left = (end_dt - today_dt).days
+                        if days_left < 0 or days_left > 31:
+                            continue
+                    except Exception:
+                        continue
                 
                 slug = pos.get('eventSlug', '') or pos.get('slug', '')
                 outcome = pos.get('outcome', '')  # "Up", "Down", "Yes", "No"
