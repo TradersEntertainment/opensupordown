@@ -77,6 +77,7 @@ def _match_slug_to_symbol(slug: str):
 def _parse_binary_market(slug: str, title: str, outcome: str):
     """
     Parses a binary market (Yes/No) like 'WTI Closes Above $80.00' or 'PLTR Closes Above $22'
+    or monthly/weekly hit bets ('WTI hit in May', 'XAU hit in week 18').
     Returns: (symbol, direction, ref_price, bet_type) or (None, None, None, None)
     """
     slug_lower = slug.lower()
@@ -87,8 +88,8 @@ def _parse_binary_market(slug: str, title: str, outcome: str):
     if outcome_upper not in ('YES', 'NO'):
         return None, None, None, None
         
-    # 2. Check if it's a closes-above / closes-below / hit market
-    is_binary = any(kw in slug_lower or kw in title_lower for kw in ('closes-above', 'closes-below', 'hit', 'close above', 'close below'))
+    # 2. Check if it's a closes-above / closes-below / hit / exceed / touch / week / month / price market
+    is_binary = any(kw in slug_lower or kw in title_lower for kw in ('closes-above', 'closes-below', 'hit', 'close above', 'close below', 'touch', 'exceed', 'week', 'month', 'price'))
     if not is_binary:
         return None, None, None, None
         
@@ -105,29 +106,54 @@ def _parse_binary_market(slug: str, title: str, outcome: str):
         return None, None, None, None
         
     # 4. Extract target price (ref_price) from title or slug
-    # Matches 'above $80.00', 'below 75.5', 'hit 80'
-    match = re.search(r"(?:above|below|hit)\s+\$?([\d\.]+)", title_lower)
-    if not match:
-        match = re.search(r"(?:above|below|hit)-([\d\.]+)", slug_lower)
-        
-    if not match:
-        return None, None, None, None
-        
-    ref_price = float(match.group(1))
+    # We want to search for the price target while ignoring week numbers (e.g. week 18) and years (e.g. 2026)
     
-    # 5. Determine direction (YES or NO)
-    # YES on Closes Above: win if price > threshold (UP-like)
-    # NO on Closes Above: win if price < threshold (DOWN-like)
-    # YES on Closes Below: win if price < threshold (DOWN-like, so we map to NO)
-    # NO on Closes Below: win if price > threshold (UP-like, so we map to YES)
+    # Heuristic A: Look for a number with a dollar sign like "$80.00", "$2400"
+    match = re.search(r"\$([\d\.,]+)", title_lower)
+    if match:
+        ref_price_str = match.group(1).replace(',', '')
+        try:
+            ref_price = float(ref_price_str)
+            # Filter out year numbers if they happen to have a dollar sign
+            if ref_price not in (2025, 2026, 2027, 2028):
+                return _build_binary_return(symbol, outcome_upper, slug_lower, title_lower, ref_price)
+        except ValueError:
+            pass
+            
+    # Heuristic B: Look for patterns like "above $80.00", "below 75.5", "hit 80", "exceed 80", "touch 80"
+    match = re.search(r"(?:above|below|hit|exceed|touch)\s+\$?([\d\.]+)", title_lower)
+    if not match:
+        match = re.search(r"(?:above|below|hit|exceed|touch)-([\d\.]+)", slug_lower)
+        
+    if match:
+        try:
+            ref_price = float(match.group(1))
+            return _build_binary_return(symbol, outcome_upper, slug_lower, title_lower, ref_price)
+        except ValueError:
+            pass
+            
+    # Heuristic C: Look for general price numbers by cleaning the text of week and year numbers
+    cleaned_title = re.sub(r"(?:week|year|202\d)\s*\-?\d+", "", title_lower)
+    match = re.search(r"\b([\d\.]+)\b", cleaned_title)
+    if match:
+        try:
+            ref_price = float(match.group(1))
+            if ref_price not in (2025, 2026, 2027, 2028):
+                return _build_binary_return(symbol, outcome_upper, slug_lower, title_lower, ref_price)
+        except ValueError:
+            pass
+
+    return None, None, None, None
+
+
+def _build_binary_return(symbol, outcome_upper, slug_lower, title_lower, ref_price):
     is_below_market = 'below' in slug_lower or 'below' in title_lower
-    
     if is_below_market:
         direction = 'NO' if outcome_upper == 'YES' else 'YES'
     else:
         direction = outcome_upper
-        
     return symbol, direction, ref_price, 'close'
+
 
 
 
