@@ -1356,7 +1356,7 @@ async def run_manual_scan() -> list:
             is_safe_bet = analysis.get("is_safe_bet", False)
 
             # If the opportunity is safe/impossible, let's send a Telegram signal if not sent recently
-            if is_impossible or is_safe_bet:
+            if False:  # Disabled inside manual scan to prevent Telegram spam when loading the webpage dashboard. Background scanner handles alerts.
                 key = (symbol, direction)
                 now_ts = time_mod.time()
                 should_send = True
@@ -1522,8 +1522,9 @@ async def run_manual_scan() -> list:
 
     filtered_results.sort(key=sort_key, reverse=True)
     
-    # Run WTI Closes Above scanner in background to send Level Alarms to Telegram if any safe bets are found
-    asyncio.create_task(scan_closes_above_markets(total_minutes))
+    # WTI Closes Above scanner is handled automatically in the background.
+    # Disabled inside manual scan to prevent Telegram spam when loading the webpage dashboard.
+    # asyncio.create_task(scan_closes_above_markets(total_minutes))
     
     return filtered_results
 
