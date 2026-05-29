@@ -938,8 +938,8 @@ async def scan_for_signals():
         except Exception as e:
             logger.error(f"Error scanning {symbol}: {e}")
 
-    # Also scan WTI Closes Above markets
-    await scan_closes_above_markets(total_minutes)
+    # Also scan for guaranteed bets
+    await scan_guaranteed_bets()
 
 
 # ─── Background Loop ───────────────────────────────────────────────────────
@@ -1221,8 +1221,8 @@ async def run_hourly_scan(total_minutes: int):
         except Exception as e:
             logger.error(f"Error scanning {symbol} during hourly scan: {e}")
 
-    # Also scan WTI Closes Above markets hourly
-    await scan_closes_above_markets(total_minutes)
+    # Also scan for guaranteed bets hourly
+    await scan_guaranteed_bets()
 
 
 
@@ -1522,178 +1522,142 @@ async def run_manual_scan() -> list:
 
     filtered_results.sort(key=sort_key, reverse=True)
     
-    # WTI Closes Above scanner is handled automatically in the background.
+    # Guaranteed bet scanner is handled automatically in the background.
     # Disabled inside manual scan to prevent Telegram spam when loading the webpage dashboard.
-    # asyncio.create_task(scan_closes_above_markets(total_minutes))
+    # asyncio.create_task(scan_guaranteed_bets())
     
     return filtered_results
 
 
-async def scan_closes_above_markets(total_minutes: int):
+def parse_market_question(question: str) -> tuple[str, float, str]:
     """
-    Scans the WTI 'closes above' markets on Polymarket.
-    Compares the current WTI price with each market threshold,
-    calculates historical move probabilities, and signals any 'impossible' bets
-    that have orderbook depth at 99c.
+    Parses question text to extract asset symbol, threshold, and market type.
+    Returns: (symbol, threshold, type) or (None, None, None)
     """
-    et_tz = pytz.timezone("US/Eastern")
-    now_et = datetime.now(et_tz)
+    q = question.upper()
     
-    # 1. Get current WTI price
-    pyth_id, full_symbol = pyth_client.get_pyth_id("WTI")
-    if not pyth_id:
-        return
+    # Identify Asset
+    matched_symbol = None
+    # 1. Direct watchlist symbols
+    for sym in SCAN_WATCHLIST:
+        if sym in q:
+            matched_symbol = sym
+            break
+            
+    # 2. Fuzzy mapping of common names
+    if not matched_symbol:
+        fuzzy_map = {
+            "PALANTIR": "PLTR",
+            "TESLA": "TSLA",
+            "NVIDIA": "NVDA",
+            "APPLE": "AAPL",
+            "AMAZON": "AMZN",
+            "GOOGLE": "GOOGL",
+            "ALPHABET": "GOOGL",
+            "MICROSOFT": "MSFT",
+            "NETFLIX": "NFLX",
+            "COINBASE": "COIN",
+            "ROBINHOOD": "HOOD",
+            "AIRBNB": "ABNB",
+            "ROCKET LAB": "RKLB",
+            "MICRON": "MU",
+            "CRUDE OIL": "WTI",
+            "GOLD": "XAU",
+            "SILVER": "XAG",
+            "NATURAL GAS": "NG",
+            "HANG SENG": "HSI",
+            "NIKKEI": "NKY",
+            "FTSE": "UKX",
+            "DOW JONES": "DIA",
+            "RUSSELL": "RUT",
+            "S&P 500": "SPY"
+        }
+        for name, sym in fuzzy_map.items():
+            if name in q:
+                matched_symbol = sym
+                break
+                
+    if not matched_symbol:
+        return None, None, None
         
-    current_wti = await pyth_client.get_active_price("WTI", pyth_id)
-    if not current_wti:
-        return
-
-    # Calculate minutes to close for WTI (closes at 17:00 ET = 1020 mins)
-    minutes_to_close_val = max(0, 1020 - total_minutes)
-    hours_left = minutes_to_close_val // 60
-    mins_left = minutes_to_close_val % 60
-
-    # 2. Fetch the WTI Closes Above event
-    month_name = now_et.strftime("%B").lower()
-    day = now_et.day
-    year = now_et.year
-    slug = f"wti-closes-above-on-{month_name}-{day}-{year}"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{GAMMA_API}/events/slug/{slug}", timeout=10.0)
-            if resp.status_code != 200:
-                logger.debug(f"WTI closes above event {slug} not found or not active")
-                return
-            event = resp.json()
-
-        markets = event.get("markets", [])
-        if not markets:
-            return
-
-        for market in markets:
-            question = market.get("question", "")
-            # Match "closes above $XX" or "closes above $XX.XX"
-            match = re.search(r"closes\s+above\s+\$([\d\.]+)", question, re.IGNORECASE)
-            if not match:
-                continue
-
-            threshold = float(match.group(1))
+    # Identify Threshold
+    threshold = None
+    q_clean = q.replace(",", "")
+    
+    # Match decimal numbers immediately following trigger words (HIT, TOUCH, ABOVE, BELOW, EXCEED, LEVEL)
+    # Allows optional parenthesis (e.g. "hit (HIGH) $150") and optional dollar sign
+    match = re.search(r"(HIT|TOUCH|ABOVE|BELOW|EXCEED|LEVEL)\s*(?:\([A-Z]+\)\s*)?\$?(\d+(?:\.\d+)?)\s*(K)?", q_clean)
+    if match:
+        try:
+            val = float(match.group(2))
+            k_suffix = match.group(3)
+            if k_suffix == "K":
+                val *= 1000
+            threshold = val
+        except ValueError:
+            pass
             
-            # Determine the safe direction and required price move (dist)
-            if threshold > current_wti:
-                safe_outcome = "No"
-                reversal_direction = "UP"
-                required_move = threshold - current_wti
-                pct_move = (required_move / current_wti) * 100
-                move_desc = f"+${required_move:.2f} (+{pct_move:.2f}%)"
-            else:
-                safe_outcome = "Yes"
-                reversal_direction = "DOWN"
-                required_move = current_wti - threshold
-                pct_move = (required_move / current_wti) * 100
-                move_desc = f"-${required_move:.2f} (-{pct_move:.2f}%)"
+    if threshold is None:
+        return None, None, None
+        
+    # Identify Market Type
+    m_type = None
+    if "HIT" in q or "TOUCH" in q:
+        m_type = "HIT"
+    elif "CLOSES ABOVE" in q or "CLOSE ABOVE" in q or "EXCEED" in q or "ABOVE" in q:
+        m_type = "CLOSES_ABOVE"
+    elif "CLOSES BELOW" in q or "CLOSE BELOW" in q or "BELOW" in q:
+        m_type = "CLOSES_BELOW"
+        
+    if not m_type:
+        m_type = "HIT"
+        
+    return matched_symbol, threshold, m_type
 
-            # Reversal threshold distance must be significant to avoid noise
-            if required_move < 0.1:
-                continue
-
-            # 3. Historical analysis
-            analysis = analyze_wti_move_risk(required_move, reversal_direction, minutes_to_close_val)
-            
-            is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
-            if not is_impossible:
-                continue
-
-            # 4. Check Polymarket pricing + orderbook depth for the safe outcome
-            outcomes = json.loads(market.get("outcomes", "[]"))
-            outcome_prices = json.loads(market.get("outcomePrices", "[]"))
-            token_ids = json.loads(market.get("clobTokenIds", "[]"))
-
-            safe_idx = None
-            for idx, o in enumerate(outcomes):
-                if o.lower() == safe_outcome.lower():
-                    safe_idx = idx
-                    break
-
-            if safe_idx is None or safe_idx >= len(outcome_prices):
-                continue
-
-            safe_price = float(outcome_prices[safe_idx])
-            safe_token = token_ids[safe_idx] if len(token_ids) > safe_idx else None
-
-            # Only signal if safe outcome price is cheap/realistic (e.g. >= 0.90 / 90c)
-            if safe_price < 0.90:
-                continue
-
-            order_str = ""
-            best_ask = None
-            total_size = 0.0
-            depth_at_99 = 0.0
-
-            if safe_token:
-                book = await fetch_orderbook_depth(safe_token)
-                cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
-                if cheap_asks:
-                    best_ask = min(cheap_asks.keys())
-                    total_size = sum(cheap_asks.values())
-                    order_str = f"{best_ask*100:.0f}¢ fiyattan ${total_size:,.0f} alım yapılabilir"
-                    
-                    depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
-                    if depth_at_99 > 0:
-                        order_str += f" (99¢'da ${depth_at_99:,.0f} aktif satıcı)"
-                else:
-                    order_str = "Satış emri bulunmuyor"
-
-            profit_pct = ((1.0 - safe_price) / safe_price) * 100
-            
-            # Deduplication guard: only send WTI Level Alarm once per day to prevent spam
-            key = (question, safe_outcome, "wti_closes_above")
-            should_send = True
-            if key in _signals_sent_today:
-                should_send = False
-            
-            if not should_send:
-                continue
-            
-            now_ts = time_mod.time()
-            
-            # Format and send Telegram Alert!
-            msg = (
-                f"🎯 <b>FINANS SCANNER - WTI SEVİYE ALARMI</b>\n\n"
-                f"📊 <b>Petrol Kapanış Seviyesi</b>\n"
-                f"<b>Soru:</b> {question}\n"
-                f"<b>Petrol Anlık Fiyat:</b> ${current_wti:.2f}\n"
-                f"<b>Seviye Hedefi:</b> ${threshold:.2f}\n"
-                f"<b>Gerekli Risk Mesafesi:</b> {move_desc}\n"
-                f"<b>Kapanışa Kalan Süre:</b> {hours_left} saat {mins_left} dakika\n\n"
-                f"📈 <b>Tarihsel Analiz (son 60 gün):</b>\n"
-                f"• WTI son 60 günde bu saat diliminde {move_desc} kadar ters yönde "
-                f"<b>{analysis['reversed_count']}/{analysis['total_similar_days']} kez</b> hareket etti (İhtimal: %{analysis['reversal_rate']:.1f})\n"
-                f"• En büyük ters hareket: {analysis['max_reversal_move']}\n\n"
-                f"💰 <b>Polymarket Safe Outcome:</b> '{safe_outcome}' ({safe_price*100:.1f}¢ ➔ $1.00 = %{profit_pct:.1f} tahmini kâr)\n"
-                f"📦 <b>Emir Kitabı (CLOB):</b> {order_str}\n\n"
-                f"🔗 <a href='https://polymarket.com/event/{slug}'>Polymarket'te İşlem Yap ↗</a>\n"
-                f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
-                f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
-            )
-
-            await send_signal(msg)
-            _signals_sent_today[key] = {
-                "time": now_ts
-            }
-            logger.info(f"WTI Closes Above signal sent: {question} -> {safe_outcome} at {safe_price}")
-
-    except Exception as e:
-        logger.error(f"Error scanning WTI Closes Above markets: {e}")
-
-
-def analyze_wti_move_risk(required_move: float, direction: str, minutes_to_close: int) -> dict:
+async def fetch_active_binary_markets() -> list:
     """
-    Calculate the historical probability of WTI moving by 'required_move' or more
+    Search and fetch all active binary markets (hit, closes-above, etc.) from Gamma API.
+    """
+    queries = ["hit", "closes%20above", "closes%20below", "touches", "exceed"]
+    all_markets = []
+    seen_market_ids = set()
+    
+    async with httpx.AsyncClient() as client:
+        for q in queries:
+            url = f"{GAMMA_API}/public-search"
+            params = {
+                "q": q,
+                "active": "true",
+                "closed": "false",
+                "limit": 50
+            }
+            try:
+                resp = await client.get(url, params=params, timeout=10.0)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                events = data.get("events", [])
+                for ev in events:
+                    markets = ev.get("markets", [])
+                    for m in markets:
+                        m_id = m.get("id")
+                        if m_id and m_id not in seen_market_ids:
+                            if m.get("active") and not m.get("closed"):
+                                seen_market_ids.add(m_id)
+                                m["event_slug"] = ev.get("slug", "")
+                                all_markets.append(m)
+            except Exception as e:
+                logger.error(f"Error fetching search query {q}: {e}")
+            await asyncio.sleep(0.2)
+            
+    return all_markets
+
+def analyze_move_risk(symbol: str, required_move: float, direction: str, minutes_to_close: int) -> dict:
+    """
+    Calculate the historical probability of 'symbol' moving by 'required_move' or more
     in the remaining 'minutes_to_close' time in the last 60 days.
     """
-    if "WTI" not in _historical_cache:
+    if symbol not in _historical_cache:
         return {
             "reversed_count": 99,
             "total_similar_days": 0,
@@ -1703,7 +1667,7 @@ def analyze_wti_move_risk(required_move: float, direction: str, minutes_to_close
             "confidence_label": "VERİ YOK",
         }
 
-    data = _historical_cache["WTI"]
+    data = _historical_cache[symbol]
     total = 0
     reversed_count = 0
     max_reversal_move = 0.0
@@ -1719,8 +1683,6 @@ def analyze_wti_move_risk(required_move: float, direction: str, minutes_to_close
             continue
 
         total += 1
-        
-        # Calculate WTI change from snap to close
         change = day["final_close"] - best_match["price"]
         
         if direction == "UP":
@@ -1749,7 +1711,12 @@ def analyze_wti_move_risk(required_move: float, direction: str, minutes_to_close
     else:
         stars, label = "❓", "YETERSİZ VERİ"
 
-    max_move_desc = f"+${max_reversal_move:.2f}" if direction == "UP" else f"-${max_reversal_move:.2f}"
+    is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+    if is_commodity:
+        max_move_desc = f"+${max_reversal_move:.2f}" if direction == "UP" else f"-${max_reversal_move:.2f}"
+    else:
+        # Stock index or Equity
+        max_move_desc = f"+{max_reversal_move:.2f}%" if direction == "UP" else f"-{max_reversal_move:.2f}%"
 
     return {
         "total_similar_days": total,
@@ -1759,5 +1726,234 @@ def analyze_wti_move_risk(required_move: float, direction: str, minutes_to_close
         "confidence_stars": stars,
         "confidence_label": label,
     }
+
+async def scan_guaranteed_bets():
+    """
+    Scans all active binary markets on Polymarket (hit, closes-above, etc.).
+    Uses historical risk analysis to detect highly certain/impossible outcomes.
+    Sends alerts to Telegram signal channels.
+    """
+    logger.info("🏆 Starting Guaranteed Bet Scanner...")
+    
+    et_tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et_tz)
+    
+    # Fetch active binary markets
+    markets = await fetch_active_binary_markets()
+    logger.info(f"Discovered {len(markets)} active binary markets on Polymarket.")
+    
+    for market in markets:
+        try:
+            question = market.get("question", "")
+            symbol, threshold, m_type = parse_market_question(question)
+            if not symbol or threshold is None or not m_type:
+                continue
+                
+            pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
+            if not pyth_id:
+                continue
+                
+            current_price = await pyth_client.get_active_price(symbol, pyth_id)
+            if not current_price:
+                continue
+                
+            # --- WTI Rollover Alpha Front-run Engine ---
+            wti_alpha_active = False
+            wti_alpha_details = ""
+            original_price = current_price
+            
+            if symbol == "WTI":
+                try:
+                    alpha_info = await pyth_client.get_wti_rollover_alpha_info()
+                    if alpha_info.get("has_alpha"):
+                        end_date_str = market.get("endDate") or market.get("endDateIso")
+                        if end_date_str:
+                            end_date_str = end_date_str.replace("Z", "+00:00")
+                            end_dt = datetime.fromisoformat(end_date_str).astimezone(et_tz)
+                            
+                            rollover_time = alpha_info.get("rollover_time")
+                            if end_dt > rollover_time:
+                                # Rollover occurs before market resolves! Resolves on NEXT contract!
+                                wti_alpha_active = True
+                                current_price = alpha_info.get("next_price")
+                                spread = alpha_info.get("spread")
+                                sign = "+" if spread >= 0 else ""
+                                wti_alpha_details = (
+                                    f"\n\n🔥 <b>ROLLOVER ALPHA MOTORU AKTİF!</b>\n"
+                                    f"• Aktif Vade ({alpha_info.get('active_symbol')}): ${alpha_info.get('active_price'):.2f}\n"
+                                    f"• Sonraki Vade ({alpha_info.get('next_symbol')}): ${alpha_info.get('next_price'):.2f}\n"
+                                    f"• <b>Fiyat Farkı (Spread):</b> {sign}${spread:.2f}\n"
+                                    f"• Kontrat Geçişine: {alpha_info.get('hours_left'):.1f} saat\n"
+                                    f"• <i>Analiz bir sonraki vadedeki ${current_price:.2f} referans alınarak yapılmıştır. Oranlar fırlayacaktır!</i> 🚀"
+                                )
+                                logger.info(f"🚨 WTI ROLLOVER ALPHA ACTIVE: Front-running spread {spread:.2f} using next price {current_price} instead of {original_price}")
+                except Exception as alpha_err:
+                    logger.error(f"Error executing WTI Rollover Alpha: {alpha_err}")
+                
+            end_date_str = market.get("endDate") or market.get("endDateIso")
+            if not end_date_str:
+                continue
+                
+            # Parse ISO date string
+            end_date_str = end_date_str.replace("Z", "+00:00")
+            end_dt = datetime.fromisoformat(end_date_str).astimezone(et_tz)
+            
+            time_left = end_dt - now_et
+            minutes_left = int(time_left.total_seconds() / 60)
+            
+            if minutes_left <= 0:
+                continue
+                
+            # Skip if time remaining is too far in the future (> 31 days)
+            if minutes_left > 44640:
+                continue
+                
+            safe_outcome = None
+            reversal_direction = None
+            required_move = 0.0
+            
+            # Hit Bet analysis
+            if m_type == "HIT":
+                if threshold > current_price:
+                    required_move = threshold - current_price
+                    reversal_direction = "UP"
+                    safe_outcome = "No"
+                else:
+                    required_move = current_price - threshold
+                    reversal_direction = "DOWN"
+                    safe_outcome = "No"
+                    
+            # Closes Above analysis
+            elif m_type == "CLOSES_ABOVE":
+                if current_price > threshold:
+                    required_move = current_price - threshold
+                    reversal_direction = "DOWN"
+                    safe_outcome = "Yes"
+                else:
+                    required_move = threshold - current_price
+                    reversal_direction = "UP"
+                    safe_outcome = "No"
+                    
+            # Closes Below analysis
+            elif m_type == "CLOSES_BELOW":
+                if current_price < threshold:
+                    required_move = threshold - current_price
+                    reversal_direction = "UP"
+                    safe_outcome = "Yes"
+                else:
+                    required_move = current_price - threshold
+                    reversal_direction = "DOWN"
+                    safe_outcome = "No"
+                    
+            if required_move < 0.05:
+                continue
+                
+            pct_move = (required_move / current_price) * 100
+            is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+            
+            if is_commodity:
+                move_desc = f"+${required_move:.2f} (+{pct_move:.2f}%)" if reversal_direction == "UP" else f"-${required_move:.2f} (-{pct_move:.2f}%)"
+            else:
+                move_desc = f"+{required_move:.2f}%" if reversal_direction == "UP" else f"-{required_move:.2f}%"
+                
+            # Historical move risk analysis
+            analysis = analyze_move_risk(symbol, required_move, reversal_direction, minutes_left)
+            
+            is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
+            if not is_impossible:
+                continue
+                
+            # Check Polymarket pricing + orderbook depth
+            outcomes = json.loads(market.get("outcomes", "[]"))
+            outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+            token_ids = json.loads(market.get("clobTokenIds", "[]"))
+            
+            safe_idx = None
+            for idx, o in enumerate(outcomes):
+                if o.lower() == safe_outcome.lower():
+                    safe_idx = idx
+                    break
+                    
+            if safe_idx is None or safe_idx >= len(outcome_prices):
+                continue
+                
+            safe_price = float(outcome_prices[safe_idx])
+            safe_token = token_ids[safe_idx] if len(token_ids) > safe_idx else None
+            
+            # Yield check (between 90c and 97c)
+            if not (0.90 <= safe_price <= 0.97):
+                continue
+                
+            order_str = ""
+            best_ask = None
+            total_size = 0.0
+            
+            if safe_token:
+                book = await fetch_orderbook_depth(safe_token)
+                cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+                if cheap_asks:
+                    best_ask = min(cheap_asks.keys())
+                    total_size = sum(cheap_asks.values())
+                    order_str = f"{best_ask*100:.0f}¢ fiyattan ${total_size:,.0f} alım yapılabilir"
+                    
+                    depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+                    if depth_at_99 > 0:
+                        order_str += f" (99¢'da ${depth_at_99:,.0f} aktif satıcı)"
+                else:
+                    order_str = "Satış emri bulunmuyor"
+                    
+            profit_pct = ((1.0 - safe_price) / safe_price) * 100
+            
+            # Deduplication
+            slug = market.get("slug", "")
+            key = (slug, safe_outcome, "guaranteed_bet")
+            if key in _signals_sent_today:
+                continue
+                
+            now_ts = time_mod.time()
+            
+            # Time left formatting
+            days_left = minutes_left // 1440
+            hrs_left = (minutes_left % 1440) // 60
+            mins_left = minutes_left % 60
+            
+            time_left_str = ""
+            if days_left > 0:
+                time_left_str += f"{days_left} gün "
+            time_left_str += f"{hrs_left} saat {mins_left} dakika"
+            
+            # Format and send Telegram Alert!
+            price_line = f"<b>{symbol} Anlık Fiyat:</b> ${current_price:.2f}\n"
+            if wti_alpha_active:
+                price_line = f"<b>WTI Eski Vade Fiyatı:</b> ${original_price:.2f}\n<b>WTI Yeni Vade Referans Fiyatı:</b> ${current_price:.2f}\n"
+                
+            msg = (
+                f"🏆 <b>SİNYAL FABRİKASI - GARANTİ BAHİS SİNYALİ</b>\n\n"
+                f"📊 <b>{symbol} {m_type.replace('_', ' ')} Bahsi</b>\n"
+                f"<b>Pazar:</b> {question}\n"
+                f"{price_line}"
+                f"<b>Hedef Seviye:</b> ${threshold:.2f}\n"
+                f"<b>Gerekli Risk Hareketi:</b> {move_desc}\n"
+                f"<b>Kapanışa Kalan Süre:</b> {time_left_str}\n\n"
+                f"📈 <b>Tarihsel Analiz (son 60 gün):</b>\n"
+                f"• {symbol} son 60 günde bu zaman diliminde {move_desc} kadar ters yönde "
+                f"<b>{analysis['reversed_count']}/{analysis['total_similar_days']} kez</b> hareket etti (İhtimal: %{analysis['reversal_rate']:.1f})\n"
+                f"• En büyük ters hareket: {analysis['max_reversal_move']}\n\n"
+                f"💰 <b>Polymarket Safe Outcome:</b> '{safe_outcome}' ({safe_price*100:.1f}¢ ➔ $1.00 = %{profit_pct:.1f} tahmini kâr)\n"
+                f"📦 <b>Emir Kitabı (CLOB):</b> {order_str}\n\n"
+                f"🔗 <a href='https://polymarket.com/event/{market.get('event_slug', slug)}'>Polymarket'te İşlem Yap ↗</a>\n"
+                f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
+                f"{wti_alpha_details}"
+            )
+            
+            await send_signal(msg)
+            _signals_sent_today[key] = {
+                "time": now_ts
+            }
+            logger.info(f"🏆 Guaranteed bet signal sent: {question} -> {safe_outcome} at {safe_price}")
+            
+        except Exception as e:
+            logger.error(f"Error scanning market {market.get('slug')}: {e}")
 
 

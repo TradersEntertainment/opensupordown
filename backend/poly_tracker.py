@@ -259,8 +259,7 @@ async def sync_positions_loop():
                 await asyncio.sleep(CHECK_INTERVAL)
                 continue
             
-            # Get today's date for filtering
-            today_str = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
+            
             
             # Get already tracked symbols to avoid duplicates
             existing = await database.get_active_positions()
@@ -271,18 +270,16 @@ async def sync_positions_loop():
                 if pos.get('redeemable', False):
                     continue
                     
-                # Only today's bets, or weekly/monthly bets that end within the next 31 days
+                # Skip expired positions (endDate < today), track all active ones
                 end_date = pos.get('endDate', '')
-                if end_date != today_str:
+                if end_date:
                     try:
-                        # Allow weekly/monthly bets that end in the next 31 days
                         end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
                         today_dt = datetime.now(pytz.timezone('US/Eastern')).date()
-                        days_left = (end_dt - today_dt).days
-                        if days_left < 0 or days_left > 31:
-                            continue
+                        if end_dt < today_dt:
+                            continue  # Already expired, skip
                     except Exception:
-                        continue
+                        pass  # If we can't parse date, still try to track it
                 
                 slug = pos.get('eventSlug', '') or pos.get('slug', '')
                 outcome = pos.get('outcome', '')  # "Up", "Down", "Yes", "No"

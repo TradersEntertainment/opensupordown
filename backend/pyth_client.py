@@ -1,6 +1,6 @@
 import httpx
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pytz
 
 logger = logging.getLogger(__name__)
@@ -8,6 +8,121 @@ logger = logging.getLogger(__name__)
 # Base URLs
 HERMES_URL = "https://hermes.pyth.network/v2"
 BENCHMARKS_URL = "https://benchmarks.pyth.network/v1"
+
+# CME WTI month codes mapping
+CME_MONTH_CODES = {
+    1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M',
+    7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'
+}
+
+def is_cme_business_day(d: date) -> bool:
+    """Check if date is a business day (not weekend or major CME holiday)."""
+    if d.weekday() >= 5:  # Saturday or Sunday
+        return False
+    # Standard major CME holidays
+    if (d.month == 1 and d.day == 1):  # New Year
+        return False
+    if (d.month == 7 and d.day == 4):  # Independence Day
+        return False
+    if (d.month == 12 and d.day == 25): # Christmas
+        return False
+    return True
+
+def get_wti_contract_ltd(delivery_year: int, delivery_month: int) -> date:
+    """
+    Returns the Last Trading Day (LTD) for WTI Crude Oil (CL) futures contract.
+    LTD is three business days prior to the 25th calendar day of the month preceding
+    the delivery month (four business days if the 25th is not a business day).
+    """
+    # Preceding month calculation
+    prec_month = delivery_month - 1
+    prec_year = delivery_year
+    if prec_month == 0:
+        prec_month = 12
+        prec_year -= 1
+        
+    ref_date = date(prec_year, prec_month, 25)
+    needed_days = 3 if is_cme_business_day(ref_date) else 4
+    
+    curr = ref_date
+    days_found = 0
+    while days_found < needed_days:
+        curr -= timedelta(days=1)
+        if is_cme_business_day(curr):
+            days_found += 1
+            
+    return curr
+
+def get_wti_rollover_datetime(delivery_year: int, delivery_month: int) -> datetime:
+    """
+    Returns the rollover datetime when this contract stops being the active month.
+    Rollover occurs at the start of the second trading session prior to LTD's session.
+    This is 2 business days prior to LTD, at 6:00 PM ET on the preceding calendar day.
+    """
+    ltd = get_wti_contract_ltd(delivery_year, delivery_month)
+    
+    curr = ltd
+    days_found = 0
+    while days_found < 2:
+        curr -= timedelta(days=1)
+        if is_cme_business_day(curr):
+            days_found += 1
+            
+    # Rollover starts at 6:00 PM ET on the calendar day prior to `curr`
+    rollover_day = curr - timedelta(days=1)
+    et_tz = pytz.timezone('US/Eastern')
+    return et_tz.localize(datetime(rollover_day.year, rollover_day.month, rollover_day.day, 18, 0, 0))
+
+def get_wti_active_contract(dt: datetime) -> str:
+    """
+    Returns the active CME WTI futures contract symbol (e.g. 'WTIN6/USD')
+    for a given ET datetime.
+    """
+    et_tz = pytz.timezone('US/Eastern')
+    if dt.tzinfo is None:
+        dt = et_tz.localize(dt)
+    else:
+        dt = dt.astimezone(et_tz)
+        
+    # Generate candidate delivery months around dt: from dt.month - 1 to dt.month + 3
+    candidates = []
+    for offset in range(-1, 4):
+        y = dt.year
+        m = dt.month + offset
+        while m <= 0:
+            m += 12
+            y -= 1
+        while m > 12:
+            m -= 12
+            y += 1
+            
+        try:
+            rollover_time = get_wti_rollover_datetime(y, m)
+            candidates.append({
+                "year": y,
+                "month": m,
+                "rollover": rollover_time
+            })
+        except Exception as e:
+            logger.error(f"Error calculating candidate rollover for delivery {y}-{m}: {e}")
+            
+    candidates.sort(key=lambda x: x["rollover"])
+    
+    # The active contract at dt is the one with the smallest rollover_datetime that is > dt.
+    active_cand = None
+    for cand in candidates:
+        if cand["rollover"] > dt:
+            active_cand = cand
+            break
+            
+    if active_cand is None:
+        # Fallback to the last candidate
+        active_cand = candidates[-1]
+        
+    cme_code = CME_MONTH_CODES.get(active_cand["month"])
+    year_digit = str(active_cand["year"])[-1]
+    
+    return f"Commodities.WTI{cme_code}{year_digit}/USD"
 
 # Hardcoded symbol mapping for common assets to avoid needing a full cache initially
 # Users can add more via dashboard/telegram if needed
@@ -74,7 +189,14 @@ async def init_feeds_cache():
 def get_pyth_id(symbol_name: str) -> str:
     """Resolve a common name like 'PLTR' or 'WTI' to a Pyth ID."""
     symbol_name = symbol_name.upper()
-    pyth_symbol = SYMBOL_MAP.get(symbol_name, symbol_name) # Fallback to input if not in map
+    
+    if symbol_name == "WTI":
+        et_tz = pytz.timezone('US/Eastern')
+        now_et = datetime.now(et_tz)
+        pyth_symbol = get_wti_active_contract(now_et)
+        logger.info(f"Resolved dynamic WTI active contract: {pyth_symbol}")
+    else:
+        pyth_symbol = SYMBOL_MAP.get(symbol_name, symbol_name) # Fallback to input if not in map
     
     # Check cache
     if pyth_symbol in pyth_id_cache:
@@ -271,3 +393,74 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
                     
     # Fallback to default ID
     return await get_latest_price(default_pyth_id)
+
+async def get_wti_rollover_alpha_info() -> dict:
+    """
+    Analyzes active WTI contract vs next contract to find price differences (spreads) 
+    that present massive trading opportunities on Polymarket before rollover occurs.
+    """
+    et_tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et_tz)
+    
+    active_symbol = get_wti_active_contract(now_et)
+    active_id = pyth_id_cache.get(active_symbol)
+    
+    # Check 28 days in the future to find next month's active contract
+    future_dt = now_et + timedelta(days=28)
+    next_symbol = get_wti_active_contract(future_dt)
+    next_id = pyth_id_cache.get(next_symbol)
+    
+    if not active_id or not next_id or active_symbol == next_symbol:
+        return {"has_alpha": False, "reason": "No rollover near or next contract not cached"}
+        
+    # Find active rollover time
+    active_rollover_time = None
+    for offset in range(-1, 4):
+        y = now_et.year
+        m = now_et.month + offset
+        while m <= 0:
+            m += 12
+            y -= 1
+        while m > 12:
+            m -= 12
+            y += 1
+        try:
+            rollover_time = get_wti_rollover_datetime(y, m)
+            cme_code = CME_MONTH_CODES.get(m)
+            year_digit = str(y)[-1]
+            cand_symbol = f"Commodities.WTI{cme_code}{year_digit}/USD"
+            if cand_symbol == active_symbol:
+                active_rollover_time = rollover_time
+                break
+        except:
+            pass
+            
+    if not active_rollover_time:
+        return {"has_alpha": False, "reason": "Could not calculate active contract rollover time"}
+        
+    time_left = active_rollover_time - now_et
+    hours_left = time_left.total_seconds() / 3600
+    
+    # Active scanning when rollover is within 5 days (120 hours)
+    if hours_left > 120 or hours_left < 0:
+        return {"has_alpha": False, "reason": f"Rollover too far ({hours_left:.1f} hours left)"}
+        
+    active_price = await get_latest_price(active_id)
+    next_price = await get_latest_price(next_id)
+    
+    if not active_price or not next_price:
+        return {"has_alpha": False, "reason": "Could not fetch prices for active or next contract"}
+        
+    spread = next_price - active_price
+    has_alpha = abs(spread) >= 0.20
+    
+    return {
+        "has_alpha": has_alpha,
+        "hours_left": hours_left,
+        "active_symbol": active_symbol.split('.')[-1].split('/')[0],
+        "next_symbol": next_symbol.split('.')[-1].split('/')[0],
+        "active_price": active_price,
+        "next_price": next_price,
+        "spread": spread,
+        "rollover_time": active_rollover_time
+    }
