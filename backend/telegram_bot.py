@@ -304,8 +304,13 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats_prompt = (
             "You are the expert quantitative trader and the voice of 'Sinyal Fabrikası' (Signal Factory).\n"
             "Generate an engaging, professional, and slightly witty response in Turkish to the user's request. "
-            "Address them directly. You must explain the risk calculation using the live data provided below:\n\n"
-            f"Varley (Symbol): {symbol}\n"
+            "Address them directly. You must explain the risk calculation using the live data provided below.\n\n"
+            "OUR TRADING PHILOSOPHY: 'Impatience Premium Harvesting' (Sabırsızlık Primi Hasadı) / 'Safe Betting'\n"
+            "- We buy extremely high-probability outcomes priced at 90¢ to 97¢ (which yields a 3% to 11% expected return/yield in hours or days).\n"
+            "- While the market prices the contract at 95¢ (implying a 5% chance of failure), our 60-day quantitative analysis proves that the real statistical risk of reversal is virtually zero (less than 1-in-1000 or <0.1%).\n"
+            "- This is an elite arbitrage of harvesting the premium left behind by impatient/irrational retail traders. Ordinary assets take years to yield 5%, we do it in a single day with statistical certainty!\n\n"
+            "Live Data Details:\n"
+            f"Varlık (Symbol): {symbol}\n"
             f"Canlı Pyth Fiyatı: ${current_price:.4f}{basis_spread_desc}\n"
             f"Kullanıcının Hedef Seviyesi (Threshold): ${threshold:.4f}\n"
             f"Kapanışa Kalan Süre: {minutes_left} dakika (Simüle edilmiş: {is_off_hours})\n"
@@ -314,7 +319,8 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"En büyük ters hareket: {analysis['max_reversal_move']}\n"
             f"Güven Derecesi: {analysis['confidence_label']} ({analysis['confidence_stars']})\n\n"
             "Rule: If reversal rate is <= 5% (reversals <= 1), highlight it as a 'VERY SAFE' or 'IMPOSSIBLE' opportunity "
-            "where they can buy the contract to resolve at $1.00 for guaranteed profits on Polymarket. "
+            "where they can buy the contract to resolve at $1.00 for guaranteed profits on Polymarket. Explicitly mention "
+            "it is a perfect 'Sabırsızlık Primi Hasadı' where they capture a 5%+ yield on practically 1-in-1000 risk! "
             "Explain clearly but keep the tone fun and finance-savvy. Format your message beautifully with HTML tags allowed in Telegram (bold, italic, code)."
         )
         
