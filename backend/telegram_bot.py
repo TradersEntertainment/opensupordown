@@ -170,7 +170,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── AI Chat & Market Analysis Integration (Groq API) ──────────────────────
 
-async def call_groq_api(messages: list) -> str:
+async def call_groq_api(messages: list, model: str = "llama-3.3-70b-versatile") -> str:
     """Helper: Calls Groq API using HTTPX to avoid heavy dependencies."""
     if not GROQ_API_KEY:
         return "Groq API Anahtarı bulunamadı. Lütfen Railway ortam değişkenlerine GROQ_API_KEY ekleyin."
@@ -181,7 +181,7 @@ async def call_groq_api(messages: list) -> str:
         "Content-Type": "application/json"
     }
     body = {
-        "model": "llama3-8b-8192",
+        "model": model,
         "messages": messages,
         "temperature": 0.3
     }
@@ -240,7 +240,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     await update.message.chat.send_action("typing")
-    intent_response = await call_groq_api(intent_messages)
+    intent_response = await call_groq_api(intent_messages, model="llama-3.1-8b-instant")
     
     # Strip any potential backticks or markdown wrapper
     intent_response = intent_response.strip().replace("```json", "").replace("```", "").strip()
