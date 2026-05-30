@@ -400,18 +400,25 @@ async def get_binance_perpetual_price(symbol: str) -> float:
         
     return None
 
+# Live 7/24 Basis Spread Calibration state
+_wti_binance_basis = 0.0
+_xau_binance_basis = 0.0
+
 async def get_active_price(symbol: str, default_pyth_id: str) -> float:
     """
     Smart price fetcher that prefers .PRE feeds for stocks during pre-market,
-    and fallbacks to 7/24 Binance Perpetual prices for Commodities (WTI/Gold) 
-    when official CME markets are closed or during weekends.
+    and fallbacks to calibrated 7/24 Binance Perpetual prices for Commodities (WTI/Gold) 
+    when official CME markets are closed (using basis spread adjustments).
     """
+    global _wti_binance_basis, _xau_binance_basis
+    
     symbol_up = symbol.upper()
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
     
-    # 1. 7/24 Commodity Alpha check (Binance perpetuals during weekends or off-hours daily breaks)
     is_commodity = any(c in symbol_up for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+    
+    # 1. 7/24 Commodity Alpha check (Binance perpetuals during weekends or off-hours daily breaks)
     if is_commodity:
         is_weekend = False
         weekday = now_et.weekday()
@@ -429,8 +436,11 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
         if is_weekend or is_daily_break:
             binance_price = await get_binance_perpetual_price(symbol_up)
             if binance_price:
-                logger.info(f"Using 7/24 Binance Perpetual price for WTI/Gold Alpha scan: ${binance_price:.2f}")
-                return binance_price
+                # Apply calibrated basis spread to reconstruct realistic CME price
+                basis = _wti_binance_basis if symbol_up == "WTI" else _xau_binance_basis
+                adjusted_price = binance_price - basis
+                logger.info(f"Commodity {symbol_up} market closed. Live Binance: ${binance_price:.2f}, Basis: ${basis:+.4f} -> Real Adjusted CME Price: ${adjusted_price:.2f}")
+                return adjusted_price
                 
     # 2. Pre-market stock logic
     total_minutes = now_et.hour * 60 + now_et.minute
@@ -446,8 +456,24 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
                 if price:
                     return price
                     
-    # Fallback to default ID
-    return await get_latest_price(default_pyth_id)
+    # 3. Fetch default active price (official market open)
+    official_price = await get_latest_price(default_pyth_id)
+    
+    # Live Calibration of Basis Spread while CME official market is open
+    if official_price and is_commodity:
+        try:
+            binance_price = await get_binance_perpetual_price(symbol_up)
+            if binance_price:
+                basis = binance_price - official_price
+                if symbol_up == "WTI":
+                    _wti_binance_basis = basis
+                else:
+                    _xau_binance_basis = basis
+                logger.debug(f"Calibrated {symbol_up} live Basis Spread: ${basis:+.4f} (Binance: ${binance_price:.2f} vs CME: ${official_price:.2f})")
+        except Exception as e:
+            logger.debug(f"Failed to calibrate live basis spread: {e}")
+            
+    return official_price
 
 async def get_wti_rollover_alpha_info() -> dict:
     """
