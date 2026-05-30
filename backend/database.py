@@ -37,6 +37,14 @@ async def init_db():
             VALUES (1, 1.0, 0.1)
         """)
         
+        # Processed trades/transactions to avoid duplicate notifications
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS processed_trades (
+                tx_hash TEXT PRIMARY KEY,
+                processed_at TEXT NOT NULL
+            )
+        """)
+        
         await db.commit()
 
 # --- Positions ---
@@ -91,5 +99,21 @@ async def update_settings(warning_zone_pct: float, step_pct: float):
         await db.execute(
             "UPDATE settings SET warning_zone_pct = ?, step_pct = ? WHERE id = 1",
             (warning_zone_pct, step_pct)
+        )
+        await db.commit()
+
+# --- Processed Trades ---
+
+async def is_trade_processed(tx_hash: str) -> bool:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT 1 FROM processed_trades WHERE tx_hash = ?", (tx_hash,)) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
+
+async def mark_trade_processed(tx_hash: str, processed_at: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO processed_trades (tx_hash, processed_at) VALUES (?, ?)",
+            (tx_hash, processed_at)
         )
         await db.commit()

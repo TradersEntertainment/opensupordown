@@ -11,13 +11,25 @@ from datetime import datetime
 import pytz
 import database
 import pyth_client
-from telegram_bot import send_notification
+from telegram_bot import send_notification, call_groq_api
 
 logger = logging.getLogger(__name__)
 
 # User's Polymarket wallet address
 TRACKED_WALLET = "0xab40bd6ef2ecb420c10d222f0cd6b1dd54d7b57d"
 POLYMARKET_DATA_API = "https://data-api.polymarket.com"
+
+# Profiles to track (Trades and Comments)
+USER_PROFILES = {
+    "0xab40bd6ef2ecb420c10d222f0cd6b1dd54d7b57d": {
+        "name": "mrsdrfinance",
+        "telegram": "@artniyetli"
+    },
+    "0xa1d57d329227c75b12b09f927fb3d6d6ef8f1343": {
+        "name": "1kto1m",
+        "telegram": "@rainingmann"
+    }
+}
 
 # Check every 5 minutes
 CHECK_INTERVAL = 300
@@ -316,6 +328,139 @@ async def sync_positions_loop():
         await asyncio.sleep(CHECK_INTERVAL)
 
 
+async def fetch_user_trades(wallet: str):
+    """Fetch all trades for a user from the Polymarket Data API."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{POLYMARKET_DATA_API}/trades",
+                params={"user": wallet, "limit": 10},
+                timeout=15.0
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                logger.error(f"Error fetching trades: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        logger.error(f"Failed to fetch trades for {wallet}: {e}")
+    return []
+
+
+def _is_crypto_trade(trade: dict) -> bool:
+    """Detect if a trade is related to crypto."""
+    title = (trade.get("title") or "").lower()
+    slug = (trade.get("slug") or "").lower()
+    event_slug = (trade.get("eventSlug") or "").lower()
+    
+    crypto_keywords = {
+        "btc", "eth", "sol", "bitcoin", "ethereum", "solana", "crypto", "binance", 
+        "coinbase", "doge", "pepe", "memecoin", "crypto", "coin", "cardano", "ripple", 
+        "xrp", "shib", "uniswap", "layer2", "blockchain", "gavax", "avax", "link", 
+        "chainlink", "fantom", "near", "polkadot"
+    }
+    
+    for word in crypto_keywords:
+        pattern = rf"\b{word}\b"
+        if re.search(pattern, title) or word in slug or word in event_slug:
+            return True
+    return False
+
+
+async def generate_friendly_advice(username: str, telegram_tag: str, trade: dict) -> str:
+    """Generate a friendly, finance-focused AI comment for the trade."""
+    side = trade.get("side", "BUY")
+    title = trade.get("title", "")
+    size = trade.get("size", 0)
+    price = trade.get("price", 0.0)
+    outcome = trade.get("outcome", "")
+    
+    prompt = (
+        "You are a finance-savvy, friendly, and witty quantitative AI trading assistant and the voice of 'Sinyal Fabrikası'.\n"
+        "A user from our group has just made a trade on Polymarket. Make a friendly, supportive, and insightful "
+        "comment in Turkish, addressing them by their Telegram tag.\n\n"
+        "Trade Details:\n"
+        f"Trader (Polymarket Username): {username}\n"
+        f"Trader (Telegram Tag): {telegram_tag}\n"
+        f"Action: {side} (e.g. BUY/SELL)\n"
+        f"Market Title: {title}\n"
+        f"Size: {size} contracts\n"
+        f"Price: ${price:.4f} per contract\n"
+        f"Outcome Bet: {outcome}\n\n"
+        "Instructions:\n"
+        "1. Be friendly, encouraging, and slightly witty.\n"
+        "2. Tag them using their Telegram tag (e.g. @artniyetli or @rainingmann).\n"
+        "3. Give them some clever, short financial advice or a quick quantitative perspective about this trade.\n"
+        "4. Keep the message concise (max 3-4 sentences) and format it beautifully with HTML tags allowed in Telegram (bold, italic, code).\n"
+        "Strictly reply in Turkish."
+    )
+    
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": f"{username} just {side.lower()} {outcome} on {title}."}
+    ]
+    
+    try:
+        response = await call_groq_api(messages)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to generate AI advice with Groq: {e}")
+        return (
+            f"🔔 <b>Yeni İşlem:</b> {telegram_tag} ({username}), <b>{title}</b> pazarında "
+            f"<b>{outcome}</b> yönünde <code>{size}</code> adet kontrat {side.lower()} etti! "
+            f"Ortalama fiyat: ${price:.4f}. Bol şans dileriz! 🚀"
+        )
+
+
+async def sync_profile_trades():
+    """Periodically check tracked user profiles for new trades and comment on them."""
+    logger.info("Polymarket Profile Trades Tracker started.")
+    
+    while True:
+        try:
+            for wallet, profile in USER_PROFILES.items():
+                username = profile["name"]
+                telegram_tag = profile["telegram"]
+                
+                trades = await fetch_user_trades(wallet)
+                if not trades:
+                    continue
+                    
+                for trade in trades:
+                    tx_hash = trade.get("transactionHash")
+                    if not tx_hash:
+                        continue
+                        
+                    # 1. Skip if already processed
+                    if await database.is_trade_processed(tx_hash):
+                        continue
+                        
+                    # 2. Skip crypto trades completely
+                    if _is_crypto_trade(trade):
+                        now_str = datetime.now().isoformat()
+                        await database.mark_trade_processed(tx_hash, now_str)
+                        continue
+                        
+                    # 3. Process traditional finance trade
+                    logger.info(f"Processing traditional finance trade for {username}: {trade.get('title')}")
+                    
+                    # Generate AI comment
+                    msg = await generate_friendly_advice(username, telegram_tag, trade)
+                    
+                    # Send notification to the group
+                    await send_notification(msg)
+                    
+                    # Mark as processed
+                    now_str = datetime.now().isoformat()
+                    await database.mark_trade_processed(tx_hash, now_str)
+                    
+        except Exception as e:
+            logger.error(f"Error in profile trades sync loop: {e}")
+            
+        # Check every 2 minutes
+        await asyncio.sleep(120)
+
+
 def start_sync_task():
-    """Start the Polymarket sync background task."""
+    """Start the Polymarket sync background tasks."""
     asyncio.create_task(sync_positions_loop())
+    asyncio.create_task(sync_profile_trades())
