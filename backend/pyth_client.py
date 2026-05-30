@@ -367,21 +367,76 @@ async def get_latest_price(pyth_id: str) -> float:
     except Exception as e:
         logger.error(f"Error fetching latest price: {e}")
         return None
+async def get_binance_perpetual_price(symbol: str) -> float:
+    """
+    Fetches 7/24 real-time perpetual futures prices from Binance API
+    for WTI (CLUSDT) and Gold (XAUTUSDT) when official CME markets are closed.
+    """
+    symbol_up = symbol.upper()
+    binance_symbol = None
+    if symbol_up == "WTI":
+        binance_symbol = "CLUSDT"
+    elif symbol_up in ["XAU", "GOLD"]:
+        binance_symbol = "XAUTUSDT"
+    elif symbol_up in ["XAG", "SILVER"]:
+        binance_symbol = "XAGUSDT"
+        
+    if not binance_symbol:
+        return None
+        
+    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={binance_symbol}"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                price_str = data.get("price")
+                if price_str:
+                    price = float(price_str)
+                    logger.info(f"Fetched 7/24 Binance Perpetual price for {symbol_up} ({binance_symbol}): ${price:.2f}")
+                    return price
+    except Exception as e:
+        logger.debug(f"Failed to fetch Binance price for {symbol_up}: {e}")
+        
+    return None
+
 async def get_active_price(symbol: str, default_pyth_id: str) -> float:
     """
-    Smart price fetcher that prefers .PRE feeds for stocks during pre-market hours.
-    ET 04:00-09:30 (TR 11:00-16:30)
+    Smart price fetcher that prefers .PRE feeds for stocks during pre-market,
+    and fallbacks to 7/24 Binance Perpetual prices for Commodities (WTI/Gold) 
+    when official CME markets are closed or during weekends.
     """
+    symbol_up = symbol.upper()
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
+    
+    # 1. 7/24 Commodity Alpha check (Binance perpetuals during weekends or off-hours daily breaks)
+    is_commodity = any(c in symbol_up for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+    if is_commodity:
+        is_weekend = False
+        weekday = now_et.weekday()
+        hour = now_et.hour
+        
+        if weekday == 4 and hour >= 17:  # Friday after 5 PM ET
+            is_weekend = True
+        elif weekday == 5:  # Saturday
+            is_weekend = True
+        elif weekday == 6 and hour < 18:  # Sunday before 6 PM ET
+            is_weekend = True
+            
+        is_daily_break = (hour == 17)  # Daily CME break (5 PM to 6 PM ET)
+        
+        if is_weekend or is_daily_break:
+            binance_price = await get_binance_perpetual_price(symbol_up)
+            if binance_price:
+                logger.info(f"Using 7/24 Binance Perpetual price for WTI/Gold Alpha scan: ${binance_price:.2f}")
+                return binance_price
+                
+    # 2. Pre-market stock logic
     total_minutes = now_et.hour * 60 + now_et.minute
     is_premarket = 240 <= total_minutes < 570
     
-    symbol_up = symbol.upper()
-    is_commodity = any(c in symbol_up for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER", "NG"])
-    
     if is_premarket and not is_commodity:
-        # Try to find a .PRE feed for this stock
         regular_pyth_symbol = SYMBOL_MAP.get(symbol_up, f"Equity.US.{symbol_up}/USD")
         if regular_pyth_symbol.startswith("Equity.US."):
             pre_symbol = f"{regular_pyth_symbol}.PRE"
