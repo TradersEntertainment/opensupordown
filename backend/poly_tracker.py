@@ -434,13 +434,29 @@ async def sync_profile_trades():
                     if await database.is_trade_processed(tx_hash):
                         continue
                         
-                    # 2. Skip crypto trades completely
+                    # 2. Only comment on BUY trades (opening/increasing positions), skip SELL trades (closing)
+                    side = trade.get("side", "BUY")
+                    if side != "BUY":
+                        now_str = datetime.now().isoformat()
+                        await database.mark_trade_processed(tx_hash, now_str)
+                        continue
+                        
+                    # 3. Only comment on brand new, active trades (skip older ones in user history)
+                    import time
+                    trade_ts = trade.get("timestamp")
+                    current_ts = int(time.time())
+                    if trade_ts and (current_ts - trade_ts > 600):  # Older than 10 minutes
+                        now_str = datetime.now().isoformat()
+                        await database.mark_trade_processed(tx_hash, now_str)
+                        continue
+                        
+                    # 4. Skip crypto trades completely
                     if _is_crypto_trade(trade):
                         now_str = datetime.now().isoformat()
                         await database.mark_trade_processed(tx_hash, now_str)
                         continue
                         
-                    # 3. Process traditional finance trade
+                    # 5. Process traditional finance trade
                     logger.info(f"Processing traditional finance trade for {username}: {trade.get('title')}")
                     
                     # Generate AI comment
