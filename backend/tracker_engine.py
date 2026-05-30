@@ -303,6 +303,102 @@ async def _check_market_open_result():
     await send_notification(msg)
 
 
+_position_price_history = {}
+_last_tail_risk_alert_time = {}
+
+async def _check_tail_risk_reversal(p, current_price):
+    """
+    Detect sudden tail-risk reversals in the last 30 minutes of the trading session.
+    If price moves sharply against a winning position in a 5-minute window, alert.
+    """
+    global _position_price_history, _last_tail_risk_alert_time
+    import time
+    
+    if not current_price:
+        return
+        
+    pos_id = p['id']
+    symbol = p['symbol'].upper()
+    direction = p['direction']
+    ref = p['ref_price']
+    
+    et_tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et_tz)
+    total_minutes = now_et.hour * 60 + now_et.minute
+    
+    is_commodity = any(c in symbol for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+    close_mins = 1020 if is_commodity else 960
+    
+    # Active only in the last 30 minutes before market close
+    if not (close_mins - 30 <= total_minutes < close_mins):
+        return
+        
+    minutes_left = close_mins - total_minutes
+    now_ts = time.time()
+    
+    # Initialize history list
+    if pos_id not in _position_price_history:
+        _position_price_history[pos_id] = []
+        
+    history = _position_price_history[pos_id]
+    
+    # 1. Clean up history older than 5 minutes (300 seconds)
+    history = [h for h in history if now_ts - h[0] <= 300]
+    history.append((now_ts, current_price))
+    _position_price_history[pos_id] = history
+    
+    # Need at least 1 minute of data points to compare
+    if len(history) < 5 or (now_ts - history[0][0] < 60):
+        return
+        
+    # Get reference window
+    oldest_price = history[0][1]
+    
+    # Cooldown check (cooldown = 3 minutes)
+    last_alert = _last_tail_risk_alert_time.get(pos_id, 0)
+    if now_ts - last_alert < 180:
+        return
+        
+    is_up_bet = 'UP' in direction or 'YES' in direction
+    is_winning = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
+    
+    # Only alert on active winning positions (which they comfortably hold as "safe bets")
+    if not is_winning:
+        return
+        
+    # Calculate price change in the 5-minute sliding window
+    change_pct = ((current_price - oldest_price) / oldest_price) * 100
+    
+    # Alert conditions:
+    # - If UP bet and price dropped sharply (change_pct is negative and abs(change_pct) >= 0.15%)
+    # - If DOWN bet and price rose sharply (change_pct is positive and change_pct >= 0.15%)
+    is_danger = False
+    move_desc = ""
+    
+    if is_up_bet and change_pct <= -0.15:
+        is_danger = True
+        move_desc = f"son 5 dakikada %{abs(change_pct):.3f} oranında sert düştü 📉"
+    elif not is_up_bet and change_pct >= 0.15:
+        is_danger = True
+        move_desc = f"son 5 dakikada %{change_pct:.3f} oranında sert yükseldi 📈"
+        
+    if is_danger:
+        _last_tail_risk_alert_time[pos_id] = now_ts
+        
+        diff_pct = ((current_price - ref) / ref) * 100
+        
+        msg = (
+            f"⚡ <b>ANİ ANOMALİ ALARMI: {symbol} {direction}</b>\n\n"
+            f"⚠️ Rahat giden pozisyonda, market kapanışına <b>{minutes_left} dakika kala</b> beklenmedik sert bir ters hareket yaşandı!\n\n"
+            f"<b>Hareket Durumu:</b> {move_desc}\n"
+            f"<b>Anlık Fiyat:</b> ${current_price:.4f}\n"
+            f"<b>Referansa Kalan Fark:</b> %{diff_pct:+.3f} (Duyarlılık kritik!)\n"
+            f"<b>Referans Seviye:</b> ${ref:.4f}\n\n"
+            f"<i>💡 Pozisyonunuz hâlâ kazanıyor ancak son saniyelerdeki bu oynaklık riski artırıyor, önlem almanız gerekebilir!</i>"
+        )
+        await send_notification(msg)
+
+
 async def _check_direction_flip(p, current_price):
     """
     Detect rapid direction changes for a position.
@@ -540,6 +636,9 @@ async def check_prices_loop():
 
                 # Check for rapid direction flips (UP→DOWN or DOWN→UP)
                 await _check_direction_flip(p, current_price)
+
+                # Check for sudden tail-risk reversals in the last 30 minutes of the session
+                await _check_tail_risk_reversal(p, current_price)
 
                 ref = p['ref_price']
                 abs_diff_pct = abs((current_price - ref) / ref) * 100
