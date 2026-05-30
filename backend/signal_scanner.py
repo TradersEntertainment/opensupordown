@@ -1618,7 +1618,7 @@ async def fetch_active_binary_markets() -> list:
     """
     Search and fetch all active binary markets (hit, closes-above, etc.) from Gamma API.
     """
-    queries = ["hit", "closes%20above", "closes%20below", "touches", "exceed"]
+    queries = ["hit", "closes above", "closes below", "touches", "exceed"]
     all_markets = []
     seen_market_ids = set()
     
