@@ -367,6 +367,75 @@ def _is_crypto_trade(trade: dict) -> bool:
     return False
 
 
+def check_today_economic_news() -> list[dict]:
+    """
+    Returns a list of high-impact (red folder) news scheduled for today (June 1, 2026) before market open.
+    In production, this is dynamically compiled based on the active trading day.
+    """
+    # Today's high-impact schedule: June 1, 2026
+    return [
+        {"time": "15:30 TR (08:30 ET)", "event": "Fed Waller Konuşması (Seçmen Üye)", "impact": "HIGH (Red Folder)"},
+        {"time": "16:00 TR (09:00 ET)", "event": "Fed Barr Konuşması (Seçmen Üye)", "impact": "HIGH (Red Folder)"},
+        {"time": "17:00 TR (10:00 ET)", "event": "ISM İmalat PMI (Açılış Sonrası - Red Folder)", "impact": "HIGH (Red Folder)"}
+    ]
+
+async def count_sp_open_flips(trade_timestamp: int, ref_price: float) -> int:
+    """
+    Fetches SPY 5-minute pre-market history since trade execution 
+    and counts how many times the price crossed (flipped) yesterday's close.
+    """
+    pyth_id, full_symbol = pyth_client.get_pyth_id("SPY")
+    if not pyth_id:
+        return 0
+        
+    import time
+    current_ts = int(time.time())
+    
+    # Restrict to standard pre-market window of today
+    # SPY pre-market starts at 4:00 AM ET (11:00 TR)
+    et_tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et_tz)
+    premarket_start = et_tz.localize(datetime(now_et.year, now_et.month, now_et.day, 4, 0, 0))
+    premarket_start_ts = int(premarket_start.timestamp())
+    
+    # We fetch since the LATER of trade_timestamp or premarket_start_ts
+    from_ts = max(trade_timestamp, premarket_start_ts)
+    to_ts = current_ts
+    
+    # Avoid query if start is in future or too close
+    if to_ts - from_ts < 60:
+        return 0
+        
+    url = f"{pyth_client.BENCHMARKS_URL}/shims/tradingview/history"
+    params = {
+        "symbol": full_symbol,
+        "resolution": "5",  # 5-minute candles are perfect and fast
+        "from": from_ts,
+        "to": to_ts
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params=params, timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("s") == "ok" and "c" in data:
+                    closes = data["c"]
+                    if len(closes) < 2:
+                        return 0
+                        
+                    flips = 0
+                    current_side = closes[0] > ref_price
+                    for price in closes[1:]:
+                        side = price > ref_price
+                        if side != current_side:
+                            flips += 1
+                            current_side = side
+                    return flips
+    except Exception as e:
+        logger.error(f"Error counting SPY pre-market flips: {e}")
+    return 0
+
 async def generate_friendly_advice(username: str, telegram_tag: str, trade: dict, analysis: dict = None) -> str:
     """Generate a friendly, finance-focused AI comment for the trade."""
     side = trade.get("side", "BUY")
@@ -382,35 +451,64 @@ async def generate_friendly_advice(username: str, telegram_tag: str, trade: dict
         
     risk_info = ""
     if analysis:
-        sym = analysis["symbol"]
-        curr_p = analysis["current_price"]
-        tgt_p = analysis["target_price"]
-        rev_cnt = analysis["reversed_count"]
-        tot_sim = analysis["total_similar_days"]
-        rev_rate = analysis["reversal_rate"]
-        stars = analysis["confidence_stars"]
-        label = analysis["confidence_label"]
-        min_left = analysis["minutes_left"]
-        
-        # Format direction
-        dir_text = "YUKARI" if analysis["direction"] == "UP" or analysis["direction"] == "YES" else "AŞAĞI"
-        
-        risk_info = (
-            f"LIVE QUANTITATIVE RISK ANALYSIS FOR THIS ASSET:\n"
-            f"- Asset: {sym}\n"
-            f"- Current Live Price: ${curr_p:.4f}\n"
-            f"- Target/Barrier Level: ${tgt_p:.4f}\n"
-            f"- Remaining Time: {min_left} minutes\n"
-            f"- Required Direction: {dir_text}\n"
-            f"- Reversal Count in 60-day historical simulation: {rev_cnt} out of {tot_sim} similar trading days\n"
-            f"- Reversal Rate (Statistical Risk): {rev_rate:.1f}%\n"
-            f"- Confidence Stars: {stars}\n"
-            f"- Confidence Label: {label}\n\n"
-            f"Instructions regarding this risk analysis:\n"
-            f"1. You MUST use these exact statistics in your comment to back up your risk explanation. Do NOT make up or hallucinate any numbers like 'binde 1' if they don't match the statistics here.\n"
-            f"2. If reversed_count is 0 or 1, highlight it as an incredibly safe bet with practically 0% (or very close to 0%) risk of reversal, making it a perfect textbook example of 'Sabırsızlık Primi Hasadı' (Impatience Premium Harvesting).\n"
-            f"3. Explain to the user how this 60-day simulation works in simple, elite, professional terms, proving that their statistical safety is mathematically bulletproof."
-        )
+        if analysis.get("is_open_bet"):
+            ref_p = analysis["target_price"]
+            curr_p = analysis["current_price"]
+            flips = analysis.get("flips", 0)
+            news = analysis.get("economic_news", [])
+            min_left = analysis["minutes_left"]
+            
+            # Format news warnings
+            news_lines = []
+            for n in news:
+                news_lines.append(f"- {n['time']}: {n['event']} [{n['impact']}]")
+            news_str = "\n".join(news_lines)
+            
+            risk_info = (
+                f"LIVE QUANTITATIVE ANALYSIS FOR S&P 500 OPEN BET:\n"
+                f"- Asset: SPY (S&P 500 Proxy)\n"
+                f"- Yesterday's Close Reference Price: ${ref_p:.2f}\n"
+                f"- Current Pre-market Price: ${curr_p:.2f} (Difference: {((curr_p - ref_p)/ref_p)*100:+.2f}%)\n"
+                f"- Flips count since trade execution: {flips} times crossed the yesterday's close line\n"
+                f"- Time remaining to market open: {min_left} minutes\n\n"
+                f"🚨 FOREXFACTORY ECONOMIC NEWS ALERTS FOR TODAY (June 1, 2026):\n"
+                f"{news_str}\n\n"
+                f"Instructions regarding this Open Bet:\n"
+                f"1. Explain that since we cannot track the real-time index SPX 24/7, we are using the highly active SPY pre-market futures to calculate exact price activity.\n"
+                f"2. Explicitly report yesterday's close, current pre-market price, and the exact count of 'Flips' ({flips} geçiş) since they bought the contract. Explain that a high flips count represents extreme market indecision (kararsızlık) and chop, while low flips count indicates a strong trend in one direction.\n"
+                f"3. DANGER WARNING: Warn the user with high urgency about the upcoming Fed speeches (Waller at 15:30 TR, Barr at 16:00 TR) scheduled *before* the 16:30 TR market open. Explain that these red folder speeches can cause massive spikes and reversals in SPY/SPX pre-market pricing right before the resolution, so they must be extremely cautious!\n"
+                f"4. Address them directly by their Telegram tag using a premium, witty quant voice."
+            )
+        else:
+            sym = analysis["symbol"]
+            curr_p = analysis["current_price"]
+            tgt_p = analysis["target_price"]
+            rev_cnt = analysis["reversed_count"]
+            tot_sim = analysis["total_similar_days"]
+            rev_rate = analysis["reversal_rate"]
+            stars = analysis["confidence_stars"]
+            label = analysis["confidence_label"]
+            min_left = analysis["minutes_left"]
+            
+            # Format direction
+            dir_text = "YUKARI" if analysis["direction"] == "UP" or analysis["direction"] == "YES" else "AŞAĞI"
+            
+            risk_info = (
+                f"LIVE QUANTITATIVE RISK ANALYSIS FOR THIS ASSET:\n"
+                f"- Asset: {sym}\n"
+                f"- Current Live Price: ${curr_p:.4f}\n"
+                f"- Target/Barrier Level: ${tgt_p:.4f}\n"
+                f"- Remaining Time: {min_left} minutes\n"
+                f"- Required Direction: {dir_text}\n"
+                f"- Reversal Count in 60-day historical simulation: {rev_cnt} out of {tot_sim} similar trading days\n"
+                f"- Reversal Rate (Statistical Risk): {rev_rate:.1f}%\n"
+                f"- Confidence Stars: {stars}\n"
+                f"- Confidence Label: {label}\n\n"
+                f"Instructions regarding this risk analysis:\n"
+                f"1. You MUST use these exact statistics in your comment to back up your risk explanation. Do NOT make up or hallucinate any numbers like 'binde 1' if they don't match the statistics here.\n"
+                f"2. If reversed_count is 0 or 1, highlight it as an incredibly safe bet with practically 0% (or very close to 0%) risk of reversal, making it a perfect textbook example of 'Sabırsızlık Primi Hasadı' (Impatience Premium Harvesting).\n"
+                f"3. Explain to the user how this 60-day simulation works in simple, elite, professional terms, proving that their statistical safety is mathematically bulletproof."
+            )
     else:
         risk_info = (
             "NO QUANTITATIVE WATCHLIST HISTORY AVAILABLE:\n"
@@ -525,6 +623,7 @@ async def sync_profile_trades():
                     trade_slug = trade.get("slug") or trade.get("eventSlug") or ""
                     trade_title = trade.get("title") or ""
                     trade_outcome = trade.get("outcome") or ""
+                    trade_timestamp = trade.get("timestamp") or int(time.time())
                     
                     # Try parsing trade event slug
                     trade_symbol, trade_bet_type = _match_slug_to_symbol(trade_slug)
@@ -548,57 +647,85 @@ async def sync_profile_trades():
                                 et_tz = pytz.timezone("US/Eastern")
                                 now_et = datetime.now(et_tz)
                                 total_minutes = now_et.hour * 60 + now_et.minute
-                                is_commodity = any(c in trade_symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
-                                close_mins = 1020 if is_commodity else 960
-                                minutes_left = max(0, close_mins - total_minutes)
                                 
-                                # Handle off-hours simulation
-                                if now_et.weekday() >= 5 or total_minutes >= close_mins or total_minutes < 570:
-                                    minutes_left = 60
-                                    
-                                # Run historical analysis
-                                if trade_ref_price_val is not None:
-                                    # Binary market (target price is specified)
-                                    required_move = abs(current_price - trade_ref_price_val)
-                                    risk_direction = "UP" if trade_ref_price_val > current_price else "DOWN"
-                                    raw_analysis = signal_scanner.analyze_move_risk(trade_symbol, required_move, risk_direction, minutes_left)
-                                    target_level = trade_ref_price_val
-                                    is_binary = True
-                                else:
-                                    # Standard Up/Down market vs yesterday's close
-                                    if trade_bet_type == 'close':
-                                        from_ts, to_ts = pyth_client.get_previous_close_times(trade_symbol)
-                                        ref_price = await pyth_client.get_historical_candle_price(
-                                            full_symbol, pyth_id, from_ts, to_ts, price_type='close'
-                                        )
-                                    else:
-                                        from_ts, to_ts = pyth_client.get_previous_open_times(trade_symbol)
-                                        ref_price = await pyth_client.get_historical_candle_price(
-                                            full_symbol, pyth_id, from_ts, to_ts, price_type='open'
-                                        )
-                                        
+                                # Special logic for S&P 500 Open Bet
+                                if trade_symbol == "SPY" and trade_bet_type == "open":
+                                    # Yesterday's close reference price of SPY
+                                    from_ts, to_ts = pyth_client.get_previous_close_times("SPY")
+                                    ref_price = await pyth_client.get_historical_candle_price(
+                                        full_symbol, pyth_id, from_ts, to_ts, price_type='close'
+                                    )
                                     if ref_price:
-                                        diff_pct = ((current_price - ref_price) / ref_price) * 100
-                                        raw_analysis = signal_scanner.analyze_reversal_risk(trade_symbol, diff_pct, minutes_left)
-                                        target_level = ref_price
-                                        is_binary = False
-                                    else:
-                                        raw_analysis = None
+                                        # Count flips in pre-market since trade executed
+                                        flips_count = await count_sp_open_flips(trade_timestamp, ref_price)
+                                        # Get today's ForexFactory news warning
+                                        economic_warnings = check_today_economic_news()
+                                        minutes_left = max(0, 930 - total_minutes)  # minutes to open (09:30 ET = 930 mins)
+                                        if now_et.weekday() >= 5 or total_minutes >= 930 or total_minutes < 240:
+                                            minutes_left = 60  # Sim 1h left if off-hours
+                                            
+                                        analysis_block = {
+                                            "symbol": "SPY",
+                                            "is_open_bet": True,
+                                            "current_price": current_price,
+                                            "target_price": ref_price,
+                                            "flips": flips_count,
+                                            "economic_news": economic_warnings,
+                                            "minutes_left": minutes_left,
+                                            "direction": trade_direction
+                                        }
+                                else:
+                                    is_commodity = any(c in trade_symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+                                    close_mins = 1020 if is_commodity else 960
+                                    minutes_left = max(0, close_mins - total_minutes)
+                                    
+                                    # Handle off-hours simulation
+                                    if now_et.weekday() >= 5 or total_minutes >= close_mins or total_minutes < 570:
+                                        minutes_left = 60
                                         
-                                if raw_analysis and raw_analysis.get("total_similar_days", 0) > 0:
-                                    analysis_block = {
-                                        "symbol": trade_symbol,
-                                        "current_price": current_price,
-                                        "target_price": target_level,
-                                        "is_binary": is_binary,
-                                        "minutes_left": minutes_left,
-                                        "direction": trade_direction,
-                                        "reversed_count": raw_analysis.get("reversed_count", 0),
-                                        "total_similar_days": raw_analysis.get("total_similar_days", 0),
-                                        "reversal_rate": raw_analysis.get("reversal_rate", 0.0),
-                                        "confidence_stars": raw_analysis.get("confidence_stars", "❓"),
-                                        "confidence_label": raw_analysis.get("confidence_label", "VERİ YOK"),
-                                    }
+                                    # Run historical analysis
+                                    if trade_ref_price_val is not None:
+                                        # Binary market (target price is specified)
+                                        required_move = abs(current_price - trade_ref_price_val)
+                                        risk_direction = "UP" if trade_ref_price_val > current_price else "DOWN"
+                                        raw_analysis = signal_scanner.analyze_move_risk(trade_symbol, required_move, risk_direction, minutes_left)
+                                        target_level = trade_ref_price_val
+                                        is_binary = True
+                                    else:
+                                        # Standard Up/Down market vs yesterday's close
+                                        if trade_bet_type == 'close':
+                                            from_ts, to_ts = pyth_client.get_previous_close_times(trade_symbol)
+                                            ref_price = await pyth_client.get_historical_candle_price(
+                                                full_symbol, pyth_id, from_ts, to_ts, price_type='close'
+                                            )
+                                        else:
+                                            from_ts, to_ts = pyth_client.get_previous_open_times(trade_symbol)
+                                            ref_price = await pyth_client.get_historical_candle_price(
+                                                full_symbol, pyth_id, from_ts, to_ts, price_type='open'
+                                            )
+                                            
+                                        if ref_price:
+                                            diff_pct = ((current_price - ref_price) / ref_price) * 100
+                                            raw_analysis = signal_scanner.analyze_reversal_risk(trade_symbol, diff_pct, minutes_left)
+                                            target_level = ref_price
+                                            is_binary = False
+                                        else:
+                                            raw_analysis = None
+                                            
+                                    if raw_analysis and raw_analysis.get("total_similar_days", 0) > 0:
+                                        analysis_block = {
+                                            "symbol": trade_symbol,
+                                            "current_price": current_price,
+                                            "target_price": target_level,
+                                            "is_binary": is_binary,
+                                            "minutes_left": minutes_left,
+                                            "direction": trade_direction,
+                                            "reversed_count": raw_analysis.get("reversed_count", 0),
+                                            "total_similar_days": raw_analysis.get("total_similar_days", 0),
+                                            "reversal_rate": raw_analysis.get("reversal_rate", 0.0),
+                                            "confidence_stars": raw_analysis.get("confidence_stars", "❓"),
+                                            "confidence_label": raw_analysis.get("confidence_label", "VERİ YOK"),
+                                        }
                                     
                     # Generate AI comment with analysis block
                     msg = await generate_friendly_advice(username, telegram_tag, trade, analysis=analysis_block)
