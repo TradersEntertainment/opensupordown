@@ -11,6 +11,7 @@ from datetime import datetime
 import pytz
 import database
 import pyth_client
+import signal_scanner
 from telegram_bot import send_notification, call_groq_api
 
 logger = logging.getLogger(__name__)
@@ -366,7 +367,7 @@ def _is_crypto_trade(trade: dict) -> bool:
     return False
 
 
-async def generate_friendly_advice(username: str, telegram_tag: str, trade: dict) -> str:
+async def generate_friendly_advice(username: str, telegram_tag: str, trade: dict, analysis: dict = None) -> str:
     """Generate a friendly, finance-focused AI comment for the trade."""
     side = trade.get("side", "BUY")
     title = trade.get("title", "")
@@ -374,28 +375,84 @@ async def generate_friendly_advice(username: str, telegram_tag: str, trade: dict
     price = trade.get("price", 0.0)
     outcome = trade.get("outcome", "")
     
+    # Calculate yield: ((1.0 - price) / price) * 100
+    expected_yield = 0.0
+    if price > 0.0 and price < 1.0:
+        expected_yield = ((1.0 - price) / price) * 100
+        
+    risk_info = ""
+    if analysis:
+        sym = analysis["symbol"]
+        curr_p = analysis["current_price"]
+        tgt_p = analysis["target_price"]
+        rev_cnt = analysis["reversed_count"]
+        tot_sim = analysis["total_similar_days"]
+        rev_rate = analysis["reversal_rate"]
+        stars = analysis["confidence_stars"]
+        label = analysis["confidence_label"]
+        min_left = analysis["minutes_left"]
+        
+        # Format direction
+        dir_text = "YUKARI" if analysis["direction"] == "UP" or analysis["direction"] == "YES" else "AŞAĞI"
+        
+        risk_info = (
+            f"LIVE QUANTITATIVE RISK ANALYSIS FOR THIS ASSET:\n"
+            f"- Asset: {sym}\n"
+            f"- Current Live Price: ${curr_p:.4f}\n"
+            f"- Target/Barrier Level: ${tgt_p:.4f}\n"
+            f"- Remaining Time: {min_left} minutes\n"
+            f"- Required Direction: {dir_text}\n"
+            f"- Reversal Count in 60-day historical simulation: {rev_cnt} out of {tot_sim} similar trading days\n"
+            f"- Reversal Rate (Statistical Risk): {rev_rate:.1f}%\n"
+            f"- Confidence Stars: {stars}\n"
+            f"- Confidence Label: {label}\n\n"
+            f"Instructions regarding this risk analysis:\n"
+            f"1. You MUST use these exact statistics in your comment to back up your risk explanation. Do NOT make up or hallucinate any numbers like 'binde 1' if they don't match the statistics here.\n"
+            f"2. If reversed_count is 0 or 1, highlight it as an incredibly safe bet with practically 0% (or very close to 0%) risk of reversal, making it a perfect textbook example of 'Sabırsızlık Primi Hasadı' (Impatience Premium Harvesting).\n"
+            f"3. Explain to the user how this 60-day simulation works in simple, elite, professional terms, proving that their statistical safety is mathematically bulletproof."
+        )
+    else:
+        risk_info = (
+            "NO QUANTITATIVE WATCHLIST HISTORY AVAILABLE:\n"
+            "- This is a macro event or not part of our standard stock/commodity watchlist.\n"
+            "- Discuss the trade qualitatively and focus on the strategic/macro context in Turkish.\n"
+            "- Do NOT mention any specific quantitative reversal statistics or fake percentages like 'binde 1'."
+        )
+        
     prompt = (
-        "You are a finance-savvy, friendly, and witty quantitative AI trading assistant and the voice of 'Sinyal Fabrikası' (Signal Factory).\n"
-        "A user from our group has just made a trade on Polymarket. Make a friendly, supportive, and highly insightful "
-        "comment in Turkish, addressing them by their Telegram tag. Speak their language and align with their specific trading philosophy.\n\n"
+        "You are the voice of 'Sinyal Fabrikası' (Signal Factory), a highly elite, witty, and sophisticated "
+        "quantitative AI trading system. You are speaking to professional retail traders in our group.\n"
+        "A user has just made a trade on Polymarket. Make an engaging, supportive, highly insightful, and "
+        "witty comment in Turkish, addressing them by their Telegram tag.\n\n"
         "OUR TRADING PHILOSOPHY: 'Impatience Premium Harvesting' (Sabırsızlık Primi Hasadı) / 'Safe Betting'\n"
-        "- We buy extremely high-probability outcomes priced at 90¢ to 97¢ (which yields a 3% to 11% expected return/yield in hours or days).\n"
-        "- While the market prices the contract at 95¢ (implying a 5% chance of failure), our 60-day quantitative analysis proves that the real statistical risk of reversal is virtually zero (less than 1-in-1000 or <0.1%).\n"
-        "- This is an elite arbitrage of harvesting the premium left behind by impatient/irrational retail traders. Ordinary assets take years to yield 5%, we do it in a single day with statistical certainty!\n\n"
+        "- We target extremely high-probability outcomes priced at 90¢ to 97¢ (yielding 3% to 11% expected return in hours/days).\n"
+        "- The market prices the contract at 95¢ (implying a 5% chance of failure), but our quantitative lookback analysis "
+        "proves that the real statistical risk of reversal is virtually zero (often 0 out of 60 days, i.e., 0.0%).\n"
+        "- This is an elite arbitrage of harvesting the premium left behind by impatient/irrational retail traders. "
+        "While ordinary assets take years to yield 5%, our traders harvest it in hours with mathematical certainty!\n\n"
         "Trade Details:\n"
-        f"Trader (Polymarket Username): {username}\n"
-        f"Trader (Telegram Tag): {telegram_tag}\n"
-        f"Action: {side} (e.g. BUY/SELL)\n"
-        f"Market Title: {title}\n"
-        f"Size: {size} contracts\n"
-        f"Price: ${price:.4f} per contract\n"
-        f"Outcome Bet: {outcome}\n\n"
-        "Instructions:\n"
-        "1. Be friendly, highly supportive, encouraging, and witty.\n"
-        "2. Tag them using their Telegram tag (e.g. @artniyetli or @rainingmann).\n"
-        "3. Explicitly compliment their 'Sabırsızlık Primi Hasadı' strategy, calculating the yield (e.g. %5 kâr) and comparing it to the extremely low statistical risk (e.g. binde 1 risk, binde sıfır ihtimal).\n"
-        "4. Keep the message concise (max 3-4 sentences) and format it beautifully with HTML tags allowed in Telegram (bold, italic, code).\n"
-        "Strictly reply in Turkish."
+        f"- Trader Username: {username}\n"
+        f"- Trader Telegram Tag: {telegram_tag}\n"
+        f"- Action: {side}\n"
+        f"- Market: {title}\n"
+        f"- Size: {size} contracts\n"
+        f"- Price: ${price:.4f} per contract\n"
+        f"- Expected Yield: %{expected_yield:.1f}\n"
+        f"- Outcome Bet: {outcome}\n\n"
+        f"{risk_info}\n\n"
+        "CRITICAL RULES:\n"
+        "1. NO MONOTONOUS OPENINGS: Do NOT start the message with repetitive cliché words like 'tebrikler!', 'Tebrikler!' or 'Sabırsızlık Primi Hasadı strategy is perfect!'. "
+        "Instead, use diverse, high-class financial openings like:\n"
+        "   - 'Harika bir hasat günü...'\n"
+        "   - 'Tahtayı süpüren bir hamle geldi...'\n"
+        "   - 'Baron yine tahtayı süpürmüş...'\n"
+        "   - 'Risk/ödül dehası yine sahnede...'\n"
+        "   - 'Matematiksel kesinlik kokusu alıyorum...'\n"
+        "   - 'Harika bir Sabırsızlık Primi hasadı daha...'\n"
+        "   - 'Risk avcısı yine iş başında...'\n"
+        "2. LANGUAGE QUALITY: Use pure, elite, high-end Turkish financial jargon. Strictly forbid mixing English, Vietnamese, or other foreign words (e.g. do not say 'cự', 'oportunite', 'together', 'chance', 'risk-free'). Use correct Turkish equivalents (e.g. 'aşırı', 'fırsat', 'birlikte', 'olasılık', 'risksiz').\n"
+        "3. EXACT STATS: If quantitative statistics are provided, you MUST use them. Explain clearly why the statistical risk is so low based on the 60-day simulation. Do NOT make up a static 'binde 1' statistic for every trade if the real simulation says otherwise.\n"
+        "4. STYLE & LENGTH: Keep the response concise (max 3-4 sentences). Format it beautifully with HTML tags allowed in Telegram (<b>, <i>, <code>, <u>, <a>)."
     )
     
     messages = [
@@ -463,8 +520,88 @@ async def sync_profile_trades():
                     # 5. Process traditional finance trade
                     logger.info(f"Processing traditional finance trade for {username}: {trade.get('title')}")
                     
-                    # Generate AI comment
-                    msg = await generate_friendly_advice(username, telegram_tag, trade)
+                    # Calculate real statistical risk if the asset is in our watchlist
+                    analysis_block = None
+                    trade_slug = trade.get("slug") or trade.get("eventSlug") or ""
+                    trade_title = trade.get("title") or ""
+                    trade_outcome = trade.get("outcome") or ""
+                    
+                    # Try parsing trade event slug
+                    trade_symbol, trade_bet_type = _match_slug_to_symbol(trade_slug)
+                    trade_ref_price_val = None
+                    
+                    if trade_symbol:
+                        trade_direction = trade_outcome.upper()
+                        if trade_direction not in ('UP', 'DOWN'):
+                            trade_symbol = None  # Reset to try binary parsing
+                            
+                    if not trade_symbol:
+                        trade_symbol, trade_direction, trade_ref_price_val, trade_bet_type = _parse_binary_market(trade_slug, trade_title, trade_outcome)
+                        
+                    if trade_symbol and trade_symbol in signal_scanner.SCAN_WATCHLIST:
+                        # Get Pyth ID and live price
+                        pyth_id, full_symbol = pyth_client.get_pyth_id(trade_symbol)
+                        if pyth_id:
+                            current_price = await pyth_client.get_active_price(trade_symbol, pyth_id)
+                            if current_price:
+                                # Calculate remaining session minutes
+                                et_tz = pytz.timezone("US/Eastern")
+                                now_et = datetime.now(et_tz)
+                                total_minutes = now_et.hour * 60 + now_et.minute
+                                is_commodity = any(c in trade_symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+                                close_mins = 1020 if is_commodity else 960
+                                minutes_left = max(0, close_mins - total_minutes)
+                                
+                                # Handle off-hours simulation
+                                if now_et.weekday() >= 5 or total_minutes >= close_mins or total_minutes < 570:
+                                    minutes_left = 60
+                                    
+                                # Run historical analysis
+                                if trade_ref_price_val is not None:
+                                    # Binary market (target price is specified)
+                                    required_move = abs(current_price - trade_ref_price_val)
+                                    risk_direction = "UP" if trade_ref_price_val > current_price else "DOWN"
+                                    raw_analysis = signal_scanner.analyze_move_risk(trade_symbol, required_move, risk_direction, minutes_left)
+                                    target_level = trade_ref_price_val
+                                    is_binary = True
+                                else:
+                                    # Standard Up/Down market vs yesterday's close
+                                    if trade_bet_type == 'close':
+                                        from_ts, to_ts = pyth_client.get_previous_close_times(trade_symbol)
+                                        ref_price = await pyth_client.get_historical_candle_price(
+                                            full_symbol, pyth_id, from_ts, to_ts, price_type='close'
+                                        )
+                                    else:
+                                        from_ts, to_ts = pyth_client.get_previous_open_times(trade_symbol)
+                                        ref_price = await pyth_client.get_historical_candle_price(
+                                            full_symbol, pyth_id, from_ts, to_ts, price_type='open'
+                                        )
+                                        
+                                    if ref_price:
+                                        diff_pct = ((current_price - ref_price) / ref_price) * 100
+                                        raw_analysis = signal_scanner.analyze_reversal_risk(trade_symbol, diff_pct, minutes_left)
+                                        target_level = ref_price
+                                        is_binary = False
+                                    else:
+                                        raw_analysis = None
+                                        
+                                if raw_analysis and raw_analysis.get("total_similar_days", 0) > 0:
+                                    analysis_block = {
+                                        "symbol": trade_symbol,
+                                        "current_price": current_price,
+                                        "target_price": target_level,
+                                        "is_binary": is_binary,
+                                        "minutes_left": minutes_left,
+                                        "direction": trade_direction,
+                                        "reversed_count": raw_analysis.get("reversed_count", 0),
+                                        "total_similar_days": raw_analysis.get("total_similar_days", 0),
+                                        "reversal_rate": raw_analysis.get("reversal_rate", 0.0),
+                                        "confidence_stars": raw_analysis.get("confidence_stars", "❓"),
+                                        "confidence_label": raw_analysis.get("confidence_label", "VERİ YOK"),
+                                    }
+                                    
+                    # Generate AI comment with analysis block
+                    msg = await generate_friendly_advice(username, telegram_tag, trade, analysis=analysis_block)
                     
                     # Send notification to the group
                     await send_notification(msg)

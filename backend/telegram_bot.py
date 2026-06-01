@@ -22,13 +22,48 @@ bot_instance = None
 if TELEGRAM_TOKEN:
     bot_instance = Bot(token=TELEGRAM_TOKEN)
 
+def clean_telegram_html(text: str) -> str:
+    """
+    Sanitizes LLM outputs to comply with Telegram's strict HTML parser.
+    Converts markdown bold/italic/code tags to HTML tags, and converts markdown links to HTML or raw bold.
+    """
+    if not text:
+        return text
+
+    # 1. Convert markdown bold **text** or __text__ to <b>text</b>
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.*?)__", r"<b>\1</b>", text)
+
+    # 2. Convert markdown italic *text* or _text_ to <i>text</i>
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"_(.*?)_", r"<i>\1</i>", text)
+
+    # 3. Convert markdown code `text` to <code>text</code>
+    text = re.sub(r"`(.*?)`", r"<code>\1</code>", text)
+
+    # 4. Resolve markdown links like [label](url)
+    def replace_markdown_link(match):
+        label = match.group(1)
+        url = match.group(2)
+        if url.startswith("http"):
+            return f'<a href="{url}">{label}</a>'
+        elif url.startswith("tg://"):
+            return f'<b>{label}</b>'  # Keep bold instead of raw tg links
+        else:
+            return label
+
+    text = re.sub(r"\[(.*?)\]\((.*?)\)", replace_markdown_link, text)
+
+    return text
+
 async def send_notification(message: str):
     """Send a message to the configured chat."""
     if not bot_instance or not CHAT_ID:
         logger.warning(f"Telegram not configured. Missed message: {message}")
         return
     try:
-        await bot_instance.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+        clean_message = clean_telegram_html(message)
+        await bot_instance.send_message(chat_id=CHAT_ID, text=clean_message, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to send telegram notification: {e}")
 
@@ -330,7 +365,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         response_text = await call_groq_api(answer_messages)
-        await update.message.reply_html(response_text)
+        await update.message.reply_html(clean_telegram_html(response_text))
         
     else:
         # Standard chat reply using Llama 3
@@ -347,7 +382,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         response_text = await call_groq_api(chat_messages)
-        await update.message.reply_html(response_text)
+        await update.message.reply_html(clean_telegram_html(response_text))
 
 
 def setup_application() -> Application:
