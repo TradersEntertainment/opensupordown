@@ -747,11 +747,27 @@ async def sync_profile_trades():
                     # Generate AI comment with analysis block
                     msg = await generate_friendly_advice(username, telegram_tag, trade, analysis=analysis_block)
                     
-                    # Send notification to the group
-                    await send_notification(msg)
+                    # Convert analysis block to JSON string if it exists
+                    import json
+                    analysis_json = json.dumps(analysis_block) if analysis_block else None
+                    
+                    # Save the trade and comment details to the database instead of sending a notification
+                    now_str = datetime.now().isoformat()
+                    await database.add_tracked_trade(
+                        tx_hash=tx_hash,
+                        username=username,
+                        telegram_tag=telegram_tag,
+                        title=trade.get("title", ""),
+                        side=trade.get("side", "BUY"),
+                        size=float(trade.get("size", 0)),
+                        price=float(trade.get("price", 0.0)),
+                        outcome=trade.get("outcome", ""),
+                        ai_comment=msg,
+                        analysis_json=analysis_json,
+                        created_at=now_str
+                    )
                     
                     # Mark as processed
-                    now_str = datetime.now().isoformat()
                     await database.mark_trade_processed(tx_hash, now_str)
                     
         except Exception as e:

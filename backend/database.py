@@ -44,6 +44,23 @@ async def init_db():
                 processed_at TEXT NOT NULL
             )
         """)
+
+        # Tracked trades with AI commentary
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_trades (
+                tx_hash TEXT PRIMARY KEY,
+                username TEXT,
+                telegram_tag TEXT,
+                title TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                outcome TEXT,
+                ai_comment TEXT,
+                analysis_json TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
         
         await db.commit()
 
@@ -117,3 +134,22 @@ async def mark_trade_processed(tx_hash: str, processed_at: str):
             (tx_hash, processed_at)
         )
         await db.commit()
+
+# --- Tracked Trades with AI Commentary ---
+
+async def add_tracked_trade(tx_hash: str, username: str, telegram_tag: str, title: str, side: str, size: float, price: float, outcome: str, ai_comment: str, analysis_json: str, created_at: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO tracked_trades 
+               (tx_hash, username, telegram_tag, title, side, size, price, outcome, ai_comment, analysis_json, created_at) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tx_hash, username, telegram_tag, title, side, size, price, outcome, ai_comment, analysis_json, created_at)
+        )
+        await db.commit()
+
+async def get_tracked_trades(limit: int = 50):
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_trades ORDER BY created_at DESC LIMIT ?", (limit,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]

@@ -92,6 +92,7 @@ const TRANSLATIONS = {
     commoditiesClose: "Emtialar Kapanış: 24:00 TR",
     tabPositions: "📈 Pozisyon Takip ve Alarm",
     tabScanner: "🎯 Finance Signal Scanner",
+    tabTrades: "🤖 Robot Yorumları & Hasatlar",
     newTag: "Yeni",
     activePositions: "Aktif Pozisyonlar",
     noActivePositions: "Henüz aktif pozisyon yok. Telegram'dan /up SPX komutu ile pozisyon ekleyebilirsiniz.",
@@ -153,7 +154,15 @@ const TRANSLATIONS = {
     serverError: "Sunucuya bağlanılamadı.",
     scanError: "Tarama sırasında bir hata oluştu.",
     loading: "Yükleniyor...",
-    cmeRollAlert: "ROLLOVER ALFA UYARISI"
+    cmeRollAlert: "ROLLOVER ALFA UYARISI",
+    noTrades: "Henüz analiz edilmiş bir işlem bulunamadı.",
+    tradeDetails: "İşlem Detayları",
+    expectedYield: "Beklenen Getiri",
+    statsRefPrice: "Referans/Hedef Fiyat",
+    statsCurrentPrice: "Canlı Fiyat",
+    statsMinsLeft: "Kapanışa Kalan Süre",
+    statsFlips: "Pre-market Flip Sayısı",
+    statsNewsAlerts: "Ekonomik Veri Uyarıları"
   },
   en: {
     title: "Poly Up/Down Tracker",
@@ -162,6 +171,7 @@ const TRANSLATIONS = {
     commoditiesClose: "Commodities Close: 17:00 ET",
     tabPositions: "📈 Position Tracking & Alarms",
     tabScanner: "🎯 Finance Signal Scanner",
+    tabTrades: "🤖 AI Trade Commentary",
     newTag: "New",
     activePositions: "Active Positions",
     noActivePositions: "No active positions yet. You can add positions via Telegram using the /up SPX command.",
@@ -223,7 +233,15 @@ const TRANSLATIONS = {
     serverError: "Could not connect to server.",
     scanError: "An error occurred during scanning.",
     loading: "Loading...",
-    cmeRollAlert: "ROLLOVER ALPHA ALERT"
+    cmeRollAlert: "ROLLOVER ALPHA ALERT",
+    noTrades: "No analyzed trades found yet.",
+    tradeDetails: "Trade Details",
+    expectedYield: "Expected Yield",
+    statsRefPrice: "Ref/Target Price",
+    statsCurrentPrice: "Live Price",
+    statsMinsLeft: "Minutes to Close",
+    statsFlips: "Pre-market Flips",
+    statsNewsAlerts: "Scheduled Economic Events"
   }
 };
 
@@ -240,6 +258,7 @@ function App() {
 
   const [positions, setPositions] = useState<Position[]>([]);
   const [settings, setSettings] = useState<Settings>({ warning_zone_pct: 1.0, step_pct: 0.1 });
+  const [trades, setTrades] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   
   // New Position State
@@ -249,7 +268,7 @@ function App() {
   const [isAdding, setIsAdding] = useState(false);
 
   // Scanner States
-  const [activeTab, setActiveTab] = useState<'positions' | 'scanner'>('positions');
+  const [activeTab, setActiveTab] = useState<'positions' | 'scanner' | 'trades'>('positions');
   const [scanResults, setScanResults] = useState<ScanResult[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanTime, setScanTime] = useState<string | null>(null);
@@ -257,13 +276,15 @@ function App() {
 
   const fetchData = async () => {
     try {
-      const [posRes, setRes] = await Promise.all([
+      const [posRes, setRes, tradesRes] = await Promise.all([
         fetch(`${API_BASE}/positions`),
-        fetch(`${API_BASE}/settings`)
+        fetch(`${API_BASE}/settings`),
+        fetch(`${API_BASE}/trades`)
       ]);
       
       if (posRes.ok) setPositions(await posRes.json());
       if (setRes.ok) setSettings(await setRes.json());
+      if (tradesRes.ok) setTrades(await tradesRes.json());
     } catch (err) {
       console.error("Failed to fetch data:", err);
     } finally {
@@ -456,9 +477,24 @@ function App() {
               {t.newTag}
             </span>
           </button>
+          <button
+            onClick={() => setActiveTab('trades')}
+            className={`px-6 py-3 font-semibold transition-all border-b-2 flex items-center gap-2 ${
+              activeTab === 'trades'
+                ? 'border-blue-500 text-blue-500 bg-blue-500/5'
+                : 'border-transparent text-poly-textMuted hover:text-white'
+            }`}
+          >
+            {t.tabTrades}
+            {trades.length > 0 && (
+              <span className="bg-blue-500 text-white text-xs px-1.5 py-0.5 rounded-full font-bold">
+                {trades.length}
+              </span>
+            )}
+          </button>
         </div>
 
-        {activeTab === 'positions' ? (
+        {activeTab === 'positions' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             
             {/* Main Content: Positions */}
@@ -652,7 +688,9 @@ function App() {
             </div>
 
           </div>
-        ) : (
+        )}
+
+        {activeTab === 'scanner' && (
           /* Scanner Screen Tab */
           <div className="space-y-6">
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-poly-card border border-poly-border rounded-xl p-5">
@@ -888,6 +926,187 @@ function App() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'trades' && (
+          <div className="space-y-6">
+            <div className="bg-poly-card border border-poly-border rounded-xl p-5">
+              <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <span>{t.tabTrades}</span>
+              </h2>
+              <p className="text-sm text-poly-textMuted mt-1">
+                {lang === 'tr' 
+                  ? 'Takip edilen Polymarket hesaplarının son işlemleri ve yapay zeka analizleri.' 
+                  : 'Latest trades and quantitative AI analysis of tracked Polymarket wallets.'}
+              </p>
+            </div>
+
+            {trades.length === 0 ? (
+              <div className="bg-poly-card border border-poly-border rounded-xl p-12 text-center text-poly-textMuted">
+                {t.noTrades}
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {trades.map(trade => {
+                  let analysis = null;
+                  if (trade.analysis_json) {
+                    try {
+                      analysis = JSON.parse(trade.analysis_json);
+                    } catch (e) {
+                      console.error("Failed to parse analysis JSON:", e);
+                    }
+                  }
+                  
+                  const expectedYield = trade.price > 0 && trade.price < 1 
+                    ? ((1 - trade.price) / trade.price) * 100 
+                    : 0;
+
+                  // Clean the comment of HTML tags that React doesn't support directly
+                  // and translate to JSX or render safely.
+                  // Telegram allows <b>, <i>, <code>, <a>, <u> etc. which standard HTML supports.
+                  // Let's replace newlines with <br /> and keep HTML formatting.
+                  const cleanCommentHtml = (trade.ai_comment || "")
+                    .replace(/\n/g, "<br />");
+
+                  return (
+                    <div key={trade.tx_hash} className="bg-poly-card border border-poly-border rounded-xl p-6 space-y-4 hover:border-gray-500 transition-all">
+                      {/* Header */}
+                      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-poly-border pb-4">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping"></span>
+                            <span className="font-bold text-white">{trade.telegram_tag}</span>
+                            <span className="text-poly-textMuted text-xs font-mono">({trade.username})</span>
+                          </div>
+                          <h3 className="font-semibold text-white mt-1 text-base">{trade.title}</h3>
+                        </div>
+                        <div className="text-xs text-poly-textMuted text-left sm:text-right shrink-0">
+                          <p className="font-mono">{new Date(trade.created_at).toLocaleString(lang === 'tr' ? 'tr-TR' : 'en-US')}</p>
+                          {trade.tx_hash && (
+                            <a 
+                              href={`https://polygonscan.com/tx/${trade.tx_hash}`} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="text-blue-400 hover:text-blue-300 font-mono text-[10px] underline block mt-0.5"
+                            >
+                              {trade.tx_hash.substring(0, 10)}...
+                            </a>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Trade Details Badges */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-poly-dark/40 p-3 rounded-lg border border-poly-border/30 text-xs">
+                        <div>
+                          <p className="text-poly-textMuted">{lang === 'tr' ? 'İşlem' : 'Side'}</p>
+                          <p className="font-bold text-white flex items-center gap-1 mt-0.5">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-green-500/20 text-green-400">{trade.side}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] ${trade.outcome.toUpperCase() === 'UP' || trade.outcome.toUpperCase() === 'YES' ? 'bg-poly-up/20 text-poly-up' : 'bg-poly-down/20 text-poly-down'}`}>
+                              {trade.outcome}
+                            </span>
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-poly-textMuted">{lang === 'tr' ? 'Miktar' : 'Contracts'}</p>
+                          <p className="font-bold text-white font-mono mt-0.5">{Math.round(trade.size).toLocaleString()}</p>
+                        </div>
+                        <div>
+                          <p className="text-poly-textMuted">{lang === 'tr' ? 'Ortalama Fiyat' : 'Avg Price'}</p>
+                          <p className="font-bold text-white font-mono mt-0.5">${trade.price.toFixed(4)}</p>
+                        </div>
+                        <div>
+                          <p className="text-poly-textMuted">{t.expectedYield}</p>
+                          <p className="font-bold text-green-400 font-mono mt-0.5">%{expectedYield.toFixed(1)}</p>
+                        </div>
+                      </div>
+
+                      {/* Two column layouts for AI comment and Quant analysis */}
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 pt-2">
+                        {/* AI Comment Column */}
+                        <div className="lg:col-span-2 space-y-2">
+                          <h4 className="text-sm font-bold text-white uppercase tracking-wider border-l-2 border-blue-500 pl-2">
+                            {lang === 'tr' ? '🤖 Yapay Zeka Yorumu' : '🤖 AI Commentary'}
+                          </h4>
+                          <div 
+                            className="text-poly-text text-sm leading-relaxed bg-poly-dark/20 p-4 rounded-lg border border-poly-border/20 prose prose-invert max-w-none"
+                            dangerouslySetInnerHTML={{ __html: cleanCommentHtml }}
+                          />
+                        </div>
+
+                        {/* Quant Statistics Column */}
+                        {analysis && (
+                          <div className="space-y-2">
+                            <h4 className="text-sm font-bold text-white uppercase tracking-wider border-l-2 border-green-500 pl-2">
+                              {lang === 'tr' ? '📊 Risk Analiz Raporu' : '📊 Quant Risk Report'}
+                            </h4>
+                            
+                            <div className="bg-poly-dark/50 border border-poly-border/40 rounded-lg p-4 space-y-3 text-xs">
+                              <div className="flex justify-between items-center border-b border-poly-border/40 pb-2">
+                                <span className="font-bold text-white text-sm">{analysis.symbol}</span>
+                                <span className="font-bold text-amber-400 text-sm">{analysis.confidence_stars || '❓'}</span>
+                              </div>
+
+                              <div className="space-y-2">
+                                <div className="flex justify-between">
+                                  <span className="text-poly-textMuted">{t.reversalRate}:</span>
+                                  <span className={`font-mono font-bold ${analysis.reversed_count === 0 ? 'text-green-400' : 'text-amber-400'}`}>
+                                    {analysis.reversed_count}/{analysis.total_similar_days} gün (%{analysis.reversal_rate?.toFixed(1)})
+                                  </span>
+                                </div>
+
+                                <div className="flex justify-between">
+                                  <span className="text-poly-textMuted">{t.statsRefPrice}:</span>
+                                  <span className="font-mono text-white">${analysis.target_price?.toFixed(4)}</span>
+                                </div>
+
+                                <div className="flex justify-between">
+                                  <span className="text-poly-textMuted">{t.statsCurrentPrice}:</span>
+                                  <span className="font-mono text-white">${analysis.current_price?.toFixed(4)}</span>
+                                </div>
+
+                                {analysis.is_open_bet ? (
+                                  <>
+                                    <div className="flex justify-between">
+                                      <span className="text-poly-textMuted">{t.statsFlips}:</span>
+                                      <span className="font-mono text-white font-bold">{analysis.flips || 0}</span>
+                                    </div>
+                                    
+                                    {analysis.economic_news && analysis.economic_news.length > 0 && (
+                                      <div className="pt-2 border-t border-poly-border/40">
+                                        <span className="text-amber-400 font-bold block mb-1">{t.statsNewsAlerts}:</span>
+                                        <ul className="space-y-1 list-disc list-inside text-poly-textMuted">
+                                          {analysis.economic_news.map((news: any, idx: number) => (
+                                            <li key={idx} className="text-[10px] leading-tight">
+                                              {news.time}: {news.event}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </>
+                                ) : (
+                                  <div className="flex justify-between">
+                                    <span className="text-poly-textMuted">{t.statsMinsLeft}:</span>
+                                    <span className="font-mono text-white">{analysis.minutes_left} dk</span>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="pt-2 border-t border-poly-border/40 text-center">
+                                <span className="text-[10px] font-bold text-green-400 bg-green-500/10 px-2 py-0.5 rounded">
+                                  {analysis.confidence_label || 'VERİ YOK'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

@@ -153,6 +153,10 @@ async def delete_position(position_id: int):
     await database.delete_position(position_id)
     return {"message": "Pozisyon silindi."}
 
+@app.get("/api/trades")
+async def get_trades():
+    return await database.get_tracked_trades()
+
 
 @app.get("/api/scan-now")
 async def run_scan_now():
