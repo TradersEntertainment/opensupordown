@@ -183,7 +183,7 @@ async def fetch_wallet_positions():
             return resp.json()
     except Exception as e:
         logger.error(f"Failed to fetch Polymarket positions: {e}")
-        return []
+        return None
 
 
 async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, title: str, ref_price: float = None):
@@ -193,18 +193,12 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
         logger.warning(f"Could not resolve Pyth ID for {symbol}, skipping auto-track")
         return False
     
-    # Get reference price
+    # Get reference price (always use yesterday's close as reference for both open and close bets)
     if ref_price is None:
-        if bet_type == 'close':
-            from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
-            ref_price = await pyth_client.get_historical_candle_price(
-                full_symbol, pyth_id, from_ts, to_ts, price_type='close'
-            )
-        else:
-            from_ts, to_ts = pyth_client.get_previous_open_times(symbol)
-            ref_price = await pyth_client.get_historical_candle_price(
-                full_symbol, pyth_id, from_ts, to_ts, price_type='open'
-            )
+        from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+        ref_price = await pyth_client.get_historical_candle_price(
+            full_symbol, pyth_id, from_ts, to_ts, price_type='close'
+        )
     else:
         import time
         to_ts = int(time.time())
@@ -244,7 +238,7 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
         f"<b>Durum:</b> {status}\n"
         f"<b>Anlık:</b> {current_price_str}\n"
         f"<b>Fark:</b> %{diff_pct:.2f}\n"
-        f"<b>Referans:</b> ${ref_price:.4f}"
+        f"<b>Referans (Dünkü Kapanış):</b> ${ref_price:.4f}"
     )
     await send_notification(msg)
     return True
@@ -268,19 +262,26 @@ async def sync_positions_loop():
                 continue
             
             positions = await fetch_wallet_positions()
-            if not positions:
+            if positions is None:
+                logger.warning("Positions fetch returned None due to error, skipping sync iteration to prevent accidental closures.")
                 await asyncio.sleep(CHECK_INTERVAL)
                 continue
             
-            
-            
-            # Get already tracked symbols to avoid duplicates
+            # Get already tracked active positions to avoid duplicates
             existing = await database.get_active_positions()
             existing_symbols = {(p['symbol'], p['direction']) for p in existing}
+            
+            # Track what is actively held in the Polymarket wallet
+            wallet_active_keys = set()
             
             for pos in positions:
                 # Skip resolved/redeemable positions
                 if pos.get('redeemable', False):
+                    continue
+                    
+                # Skip dust positions
+                size = float(pos.get('size', 0))
+                if size <= 0.1:  # ignore dust / zero size positions
                     continue
                     
                 # Skip expired positions (endDate < today), track all active ones
@@ -316,12 +317,28 @@ async def sync_positions_loop():
                     
                 db_direction = f"OPEN_{direction}" if bet_type == 'open' else direction
                 
+                # Record this position as active in the user's Polymarket wallet
+                wallet_active_keys.add((symbol, db_direction))
+                
                 # Skip if already tracked
                 if (symbol, db_direction) in existing_symbols:
                     continue
                 
                 logger.info(f"Auto-tracking new position: {symbol} {db_direction} from Polymarket")
                 await _add_position_from_poly(symbol, direction, bet_type, title, ref_price=ref_price_val)
+            
+            # Clean up positions that are active locally but missing from the Polymarket wallet
+            for p in existing:
+                db_key = (p['symbol'], p['direction'])
+                if db_key not in wallet_active_keys:
+                    logger.info(f"Position {p['symbol']} {p['direction']} (ID: {p['id']}) not found in active Polymarket positions. Closing locally.")
+                    await database.close_position(p['id'])
+                    
+                    msg = (
+                        f"ℹ️ <b>Takip Sonlandırıldı: {p['symbol']} {p['direction']}</b>\n\n"
+                        f"Polymarket cüzdanınızda bu pozisyon artık bulunamadı (satılmış veya kapatılmış olabilir)."
+                    )
+                    await send_notification(msg)
                 
         except Exception as e:
             logger.error(f"Error in poly sync loop: {e}")

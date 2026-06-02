@@ -97,15 +97,10 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE, di
         await update.message.reply_text(f"❌ '{symbol_input}' Pyth sisteminde bulunamadı. Lütfen tam sembolü kontrol edin.")
         return
         
-    # Get reference price (yesterday's close OR today's open)
-    if bet_type == 'close':
-        from_ts, to_ts = pyth_client.get_previous_close_times(symbol_input)
-        ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='close')
-        time_desc = "Dünkü 15:59 ET Kapanış"
-    else:
-        from_ts, to_ts = pyth_client.get_previous_open_times(symbol_input)
-        ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='open')
-        time_desc = "Bugünkü 09:30 ET Açılış"
+    # Get reference price (always use previous trading day's close as baseline)
+    from_ts, to_ts = pyth_client.get_previous_close_times(symbol_input)
+    ref_price = await pyth_client.get_historical_candle_price(full_symbol, pyth_id, from_ts, to_ts, price_type='close')
+    time_desc = "Dünkü 15:59 ET Kapanış"
         
     if ref_price is None:
         await update.message.reply_text(f"❌ {full_symbol} için {time_desc} mumu Pyth'den çekilemedi! Daha sonra tekrar deneyin.")

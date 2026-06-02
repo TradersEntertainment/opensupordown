@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import database
 import pyth_client
@@ -63,36 +63,91 @@ def is_market_completely_closed() -> bool:
 
 
 async def _check_auto_expire(positions):
-    """Closes positions if their market close time has passed."""
+    """Closes positions if their resolution time has passed (9:30 AM ET for open bets, market close for close bets)."""
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
 
     for p in positions:
         symbol = p['symbol'].upper()
-        is_commodity = any(c in symbol for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
-        close_hour = 17 if is_commodity else 16
+        direction = p['direction'].upper()
+        is_open_bet = 'OPEN_' in direction
 
-        if now_et.hour >= close_hour:
-            logger.info(f"Auto-closing position {p['id']} ({symbol})")
+        # Parse creation time to US/Eastern
+        try:
+            created_dt = datetime.fromisoformat(p['created_at'])
+            if created_dt.tzinfo is None:
+                # System local time assumed, localize and convert to ET
+                created_dt = created_dt.astimezone(et_tz)
+            else:
+                created_dt = created_dt.astimezone(et_tz)
+        except Exception as e:
+            logger.error(f"Error parsing created_at for position {p['id']}: {e}")
+            created_dt = now_et - timedelta(days=1)  # Fallback to allow resolution
 
-            current_price = await pyth_client.get_latest_price(p['pyth_id'])
-            ref = p['ref_price']
-            is_win = False
-            if current_price:
-                is_up_bet = 'UP' in p['direction'] or 'YES' in p['direction']
-                is_win = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
+        if is_open_bet:
+            # Open bets resolve at 9:30 AM ET (16:30 TR)
+            today_open_et = et_tz.localize(datetime(now_et.year, now_et.month, now_et.day, 9, 30, 0))
+            # Resolve if current time is past 9:30 AM ET today, AND position was created before today's 9:30 AM ET
+            if now_et >= today_open_et and created_dt < today_open_et:
+                logger.info(f"Auto-resolving open bet position {p['id']} ({symbol} {direction})")
+                
+                # Fetch opening price
+                open_price = None
+                try:
+                    from_ts, to_ts = pyth_client.get_previous_open_times(symbol)
+                    _, full_symbol = pyth_client.get_pyth_id(symbol)
+                    open_price = await pyth_client.get_historical_candle_price(
+                        full_symbol or symbol, p['pyth_id'], from_ts, to_ts, price_type='open'
+                    )
+                except Exception as ex:
+                    logger.error(f"Error fetching historical open price for {symbol}: {ex}")
 
-            result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
-            current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
+                if not open_price:
+                    open_price = await pyth_client.get_latest_price(p['pyth_id'])
 
-            msg = (
-                f"🏁 <b>MARKET KAPANDI: {symbol} {p['direction']}</b>\n\n"
-                f"<b>Sonuç:</b> {result_str}\n"
-                f"<b>Kapanış:</b> {current_price_str}\n"
-                f"<b>Referans:</b> ${ref:.4f}"
-            )
-            await send_notification(msg)
-            await database.close_position(p['id'])
+                ref = p['ref_price']
+                is_win = False
+                if open_price:
+                    is_up_bet = 'UP' in direction or 'YES' in direction
+                    is_win = (is_up_bet and open_price > ref) or (not is_up_bet and open_price < ref)
+
+                result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
+                open_price_str = f"${open_price:.4f}" if open_price else "Bilinmiyor"
+
+                msg = (
+                    f"🏁 <b>MARKET AÇILDI: {symbol} {direction}</b>\n\n"
+                    f"<b>Sonuç:</b> {result_str}\n"
+                    f"<b>Açılış:</b> {open_price_str}\n"
+                    f"<b>Referans (Dünkü Kapanış):</b> ${ref:.4f}"
+                )
+                await send_notification(msg)
+                await database.close_position(p['id'])
+        else:
+            # Regular close bets resolve at market close (16:00 ET for stocks, 17:00 ET for commodities)
+            is_commodity = any(c in symbol for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+            close_hour = 17 if is_commodity else 16
+
+            if now_et.hour >= close_hour:
+                logger.info(f"Auto-closing position {p['id']} ({symbol})")
+
+                current_price = await pyth_client.get_latest_price(p['pyth_id'])
+                ref = p['ref_price']
+                is_win = False
+                if current_price:
+                    is_up_bet = 'UP' in direction or 'YES' in direction
+                    is_win = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
+
+                result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
+                current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
+
+                msg = (
+                    f"🏁 <b>MARKET KAPANDI: {symbol} {direction}</b>\n\n"
+                    f"<b>Sonuç:</b> {result_str}\n"
+                    f"<b>Kapanış:</b> {current_price_str}\n"
+                    f"<b>Referans:</b> ${ref:.4f}"
+                )
+                await send_notification(msg)
+                await database.close_position(p['id'])
 
 
 async def _send_closing_summary(positions):
