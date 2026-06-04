@@ -1179,7 +1179,7 @@ async def run_hourly_scan(total_minutes: int):
                 msg += f"🔗 <a href='{slug_link}'>Polymarket'te İşlem Yap ↗</a>\n"
                 
             msg += (
-                f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                f"🖥️ <a href='https://upordownwebsite.up.railway.app/'>Canlı Panel Takip ↗</a>\n\n"
                 f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
             )
 
@@ -1421,7 +1421,7 @@ async def run_manual_scan() -> list:
                         msg += f"🔗 <a href='{slug_link}'>Polymarket'te İşlem Yap ↗</a>\n"
                         
                     msg += (
-                        f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                        f"🖥️ <a href='https://upordownwebsite.up.railway.app/'>Canlı Panel Takip ↗</a>\n\n"
                         f"<b>{analysis.get('confidence_stars')} {analysis.get('confidence_label')}</b>"
                     )
                     
@@ -1942,7 +1942,7 @@ async def scan_guaranteed_bets():
                 f"💰 <b>Polymarket Safe Outcome:</b> '{safe_outcome}' ({safe_price*100:.1f}¢ ➔ $1.00 = %{profit_pct:.1f} tahmini kâr)\n"
                 f"📦 <b>Emir Kitabı (CLOB):</b> {order_str}\n\n"
                 f"🔗 <a href='https://polymarket.com/event/{market.get('event_slug', slug)}'>Polymarket'te İşlem Yap ↗</a>\n"
-                f"🖥️ <a href='https://opensupordown.railway.app'>Canlı Panel Takip ↗</a>\n\n"
+                f"🖥️ <a href='https://upordownwebsite.up.railway.app/'>Canlı Panel Takip ↗</a>\n\n"
                 f"<b>{analysis['confidence_stars']} {analysis['confidence_label']}</b>"
                 f"{wti_alpha_details}"
             )
