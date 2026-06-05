@@ -18,9 +18,17 @@ async def init_db():
                 ref_timestamp INTEGER NOT NULL, -- Timestamp of the reference candle
                 status TEXT DEFAULT 'active', -- 'active' or 'closed'
                 last_warning_distance REAL DEFAULT 999.0, -- Track progressive warnings
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                title TEXT DEFAULT ''
             )
         """)
+        
+        # Try to add title column if table already exists without it
+        try:
+            await db.execute("ALTER TABLE positions ADD COLUMN title TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass # Column already exists
         
         # Settings table
         await db.execute("""
@@ -66,13 +74,13 @@ async def init_db():
 
 # --- Positions ---
 
-async def add_position(symbol: str, pyth_id: str, direction: str, ref_price: float, ref_timestamp: int, created_at: str):
+async def add_position(symbol: str, pyth_id: str, direction: str, ref_price: float, ref_timestamp: int, created_at: str, title: str = ""):
     async with aiosqlite.connect(DB_FILE) as db:
         cursor = await db.execute(
             """INSERT INTO positions 
-               (symbol, pyth_id, direction, ref_price, ref_timestamp, status, created_at) 
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (symbol, pyth_id, direction, ref_price, ref_timestamp, 'active', created_at)
+               (symbol, pyth_id, direction, ref_price, ref_timestamp, status, created_at, title) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (symbol, pyth_id, direction, ref_price, ref_timestamp, 'active', created_at, title)
         )
         await db.commit()
         return cursor.lastrowid
@@ -100,6 +108,14 @@ async def close_position(position_id: int):
 async def delete_position(position_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+        await db.commit()
+
+async def update_position_title_if_empty(symbol: str, direction: str, title: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            "UPDATE positions SET title = ? WHERE symbol = ? AND direction = ? AND (title IS NULL OR title = '') AND status = 'active'",
+            (title, symbol, direction)
+        )
         await db.commit()
 
 # --- Settings ---

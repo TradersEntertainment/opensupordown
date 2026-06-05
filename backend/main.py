@@ -119,6 +119,8 @@ async def create_position(req: PositionCreate):
     # Save to database
     now_str = datetime.now().isoformat()
     db_direction = f"OPEN_{direction}" if bet_type == 'open' else direction
+    bet_desc = "open" if bet_type == 'open' else "close"
+    title = f"Will {symbol_input} {bet_desc} {'UP' if direction == 'UP' else 'DOWN'}?"
     
     await database.add_position(
         symbol=symbol_input,
@@ -126,7 +128,8 @@ async def create_position(req: PositionCreate):
         direction=db_direction,
         ref_price=ref_price,
         ref_timestamp=to_ts,
-        created_at=now_str
+        created_at=now_str,
+        title=title
     )
     
     diff_pct = 0.0

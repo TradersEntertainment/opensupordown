@@ -217,7 +217,8 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
         direction=db_direction,
         ref_price=ref_price,
         ref_timestamp=to_ts,
-        created_at=now_str
+        created_at=now_str,
+        title=title
     )
     
     # Get current price for notification
@@ -334,6 +335,7 @@ async def sync_positions_loop():
                 # If it is already tracked, we still count it in wallet_active_keys to keep tracking active
                 if (symbol, db_direction) in existing_symbols:
                     wallet_active_keys.add((symbol, db_direction))
+                    await database.update_position_title_if_empty(symbol, db_direction, title)
                     continue
                     
                 # If it's expired and not yet tracked, do NOT track it!

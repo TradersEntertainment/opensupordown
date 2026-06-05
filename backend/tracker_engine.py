@@ -62,6 +62,112 @@ def is_market_completely_closed() -> bool:
     return total_minutes < (4 * 60) or total_minutes > (17 * 60 + 30)
 
 
+async def is_position_winning(p, price) -> bool:
+    """Helper to determine if a position is currently winning relative to the reference/target level."""
+    symbol = p['symbol'].upper()
+    direction = p['direction'].upper()
+    ref = p['ref_price']
+    
+    if direction in ('YES', 'NO'):
+        # Binary hit bet
+        try:
+            created_dt = datetime.fromisoformat(p['created_at'])
+            et_tz = pytz.timezone('US/Eastern')
+            if created_dt.tzinfo is None:
+                created_dt = et_tz.localize(created_dt)
+            created_ts = int(created_dt.timestamp())
+        except:
+            created_ts = 0
+            
+        creation_price = None
+        if created_ts > 0:
+            try:
+                _, full_symbol = pyth_client.get_pyth_id(symbol)
+                creation_price = await pyth_client.get_historical_candle_price(
+                    full_symbol or symbol, p['pyth_id'], created_ts - 120, created_ts + 120, price_type='close'
+                )
+            except:
+                pass
+        is_low_bet = None
+        title_lower = p.get('title', '').lower() if p.get('title') else ''
+        if any(kw in title_lower for kw in ['(low)', 'dip', 'below', 'drop', 'under', 'down']):
+            is_low_bet = True
+        elif any(kw in title_lower for kw in ['(high)', 'exceed', 'above', 'rise', 'climb', 'up']):
+            is_low_bet = False
+            
+        if is_low_bet is None:
+            is_low_bet = creation_price > ref
+        
+        if is_low_bet:
+            if direction == 'YES':
+                # YES wins if price touches or goes below ref
+                return price <= ref
+            else: # NO
+                # NO wins if price stays above ref
+                return price > ref
+        else: # HIGH bet
+            if direction == 'YES':
+                # YES wins if price touches or goes above ref
+                return price >= ref
+            else: # NO
+                # NO wins if price stays below ref
+                return price < ref
+    else:
+        # Standard open/close bets
+        is_up_bet = 'UP' in direction
+        if is_up_bet:
+            return price > ref
+        else:
+            return price < ref
+
+
+async def is_up_seeking_position(p, price) -> bool:
+    """Helper to determine if a position is up-seeking (meaning it wants price to go up/above ref)."""
+    symbol = p['symbol'].upper()
+    direction = p['direction'].upper()
+    ref = p['ref_price']
+    
+    if direction in ('YES', 'NO'):
+        # Binary hit bet
+        try:
+            created_dt = datetime.fromisoformat(p['created_at'])
+            et_tz = pytz.timezone('US/Eastern')
+            if created_dt.tzinfo is None:
+                created_dt = et_tz.localize(created_dt)
+            created_ts = int(created_dt.timestamp())
+        except:
+            created_ts = 0
+            
+        creation_price = None
+        if created_ts > 0:
+            try:
+                _, full_symbol = pyth_client.get_pyth_id(symbol)
+                creation_price = await pyth_client.get_historical_candle_price(
+                    full_symbol or symbol, p['pyth_id'], created_ts - 120, created_ts + 120, price_type='close'
+                )
+            except:
+                pass
+        if not creation_price:
+            creation_price = price
+            
+        is_low_bet = None
+        title_lower = p.get('title', '').lower() if p.get('title') else ''
+        if any(kw in title_lower for kw in ['(low)', 'dip', 'below', 'drop', 'under', 'down']):
+            is_low_bet = True
+        elif any(kw in title_lower for kw in ['(high)', 'exceed', 'above', 'rise', 'climb', 'up']):
+            is_low_bet = False
+            
+        if is_low_bet is None:
+            is_low_bet = creation_price > ref
+            
+        if is_low_bet:
+            return direction == 'NO'
+        else:
+            return direction == 'YES'
+    else:
+        return 'UP' in direction
+
+
 async def _check_auto_expire(positions):
     """Closes positions if their resolution time has passed (9:30 AM ET for open bets, market close for close bets)."""
     et_tz = pytz.timezone('US/Eastern')
@@ -108,8 +214,7 @@ async def _check_auto_expire(positions):
                 ref = p['ref_price']
                 is_win = False
                 if open_price:
-                    is_up_bet = 'UP' in direction or 'YES' in direction
-                    is_win = (is_up_bet and open_price > ref) or (not is_up_bet and open_price < ref)
+                    is_win = await is_position_winning(p, open_price)
 
                 result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
                 open_price_str = f"${open_price:.4f}" if open_price else "Bilinmiyor"
@@ -134,8 +239,7 @@ async def _check_auto_expire(positions):
                 ref = p['ref_price']
                 is_win = False
                 if current_price:
-                    is_up_bet = 'UP' in direction or 'YES' in direction
-                    is_win = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
+                    is_win = await is_position_winning(p, current_price)
 
                 result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
                 current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
@@ -195,8 +299,7 @@ async def _send_closing_summary(positions):
         
         ref = p['ref_price']
         diff_pct = ((current_price - ref) / ref) * 100
-        is_up_bet = 'UP' in p['direction'] or 'YES' in p['direction']
-        is_winning = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
+        is_winning = await is_position_winning(p, current_price)
         
         symbol = p['symbol']
         is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
@@ -414,8 +517,7 @@ async def _check_tail_risk_reversal(p, current_price):
     if now_ts - last_alert < 180:
         return
         
-    is_up_bet = 'UP' in direction or 'YES' in direction
-    is_winning = (is_up_bet and current_price > ref) or (not is_up_bet and current_price < ref)
+    is_winning = await is_position_winning(p, current_price)
     
     # Only alert on active winning positions (which they comfortably hold as "safe bets")
     if not is_winning:
@@ -430,10 +532,11 @@ async def _check_tail_risk_reversal(p, current_price):
     is_danger = False
     move_desc = ""
     
-    if is_up_bet and change_pct <= -0.15:
+    is_up_seeking_bet = await is_up_seeking_position(p, current_price)
+    if is_up_seeking_bet and change_pct <= -0.15:
         is_danger = True
         move_desc = f"son 5 dakikada %{abs(change_pct):.3f} oranında sert düştü 📉"
-    elif not is_up_bet and change_pct >= 0.15:
+    elif not is_up_seeking_bet and change_pct >= 0.15:
         is_danger = True
         move_desc = f"son 5 dakikada %{change_pct:.3f} oranında sert yükseldi 📈"
         
@@ -694,11 +797,17 @@ async def check_and_resolve_hit_bet(p, current_price) -> bool:
     creation_price = await pyth_client.get_historical_candle_price(
         full_symbol or symbol, pyth_id, created_ts - 120, created_ts + 120, price_type='close'
     )
-    if not creation_price:
-        # Guess based on current price relative to target
-        creation_price = current_price
+    is_low_bet = None
+    title_lower = p.get('title', '').lower() if p.get('title') else ''
+    if any(kw in title_lower for kw in ['(low)', 'dip', 'below', 'drop', 'under', 'down']):
+        is_low_bet = True
+    elif any(kw in title_lower for kw in ['(high)', 'exceed', 'above', 'rise', 'climb', 'up']):
+        is_low_bet = False
         
-    is_low_bet = creation_price > ref
+    if is_low_bet is None:
+        if not creation_price:
+            creation_price = current_price
+        is_low_bet = creation_price > ref
     
     # 2. Get the lowest and highest price reached since creation
     low_reached, high_reached = await get_historical_min_max(symbol, pyth_id, created_ts, current_ts)
@@ -810,8 +919,7 @@ async def check_prices_loop():
                         await database.update_warning_distance(p['id'], current_threshold)
 
                         direction = p['direction']
-                        is_up_bet = 'UP' in direction or 'YES' in direction
-                        is_losing = (is_up_bet and current_price <= ref) or (not is_up_bet and current_price >= ref)
+                        is_losing = not (await is_position_winning(p, current_price))
 
                         status_word = "KAYBEDİYOR 🔴" if is_losing else "KAZANIYOR 🟢"
                         urgency = "🚨" if abs_diff_pct <= step_pct else "⚠️"
