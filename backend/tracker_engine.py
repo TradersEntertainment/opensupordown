@@ -96,6 +96,8 @@ async def is_position_winning(p, price) -> bool:
             is_low_bet = False
             
         if is_low_bet is None:
+            if not creation_price:
+                creation_price = price
             is_low_bet = creation_price > ref
         
         if is_low_bet:
