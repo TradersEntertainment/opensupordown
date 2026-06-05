@@ -317,12 +317,31 @@ async def sync_positions_loop():
                     
                 db_direction = f"OPEN_{direction}" if bet_type == 'open' else direction
                 
+                # Check if the resolution time has already passed today
+                et_tz = pytz.timezone('US/Eastern')
+                now_et = datetime.now(et_tz)
+                is_expired = False
+                if bet_type == 'open':
+                    today_open_et = et_tz.localize(datetime(now_et.year, now_et.month, now_et.day, 9, 30, 0))
+                    if now_et >= today_open_et:
+                        is_expired = True
+                else: # close bet
+                    is_commodity = any(c in symbol for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+                    close_hour = 17 if is_commodity else 16
+                    if now_et.hour >= close_hour:
+                        is_expired = True
+                
+                # If it is already tracked, we still count it in wallet_active_keys to keep tracking active
+                if (symbol, db_direction) in existing_symbols:
+                    wallet_active_keys.add((symbol, db_direction))
+                    continue
+                    
+                # If it's expired and not yet tracked, do NOT track it!
+                if is_expired:
+                    continue
+                
                 # Record this position as active in the user's Polymarket wallet
                 wallet_active_keys.add((symbol, db_direction))
-                
-                # Skip if already tracked
-                if (symbol, db_direction) in existing_symbols:
-                    continue
                 
                 logger.info(f"Auto-tracking new position: {symbol} {db_direction} from Polymarket")
                 await _add_position_from_poly(symbol, direction, bet_type, title, ref_price=ref_price_val)

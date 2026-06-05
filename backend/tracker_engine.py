@@ -643,6 +643,102 @@ async def _check_premarket_movers():
     await send_notification("\n".join(lines))
 
 
+async def get_historical_min_max(symbol: str, pyth_id: str, from_ts: int, to_ts: int) -> tuple[float, float]:
+    """Fetches the lowest and highest price reached using Pyth history API."""
+    import httpx
+    _, full_symbol = pyth_client.get_pyth_id(symbol)
+    url = f"{pyth_client.BENCHMARKS_URL}/shims/tradingview/history"
+    params = {
+        "symbol": full_symbol or symbol,
+        "resolution": "60", # 1-hour resolution is lightweight and fast
+        "from": from_ts,
+        "to": to_ts
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params=params, timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("s") == "ok" and "l" in data and "h" in data:
+                    lows = [float(x) for x in data["l"]]
+                    highs = [float(x) for x in data["h"]]
+                    if lows and highs:
+                        return min(lows), max(highs)
+    except Exception as e:
+        logger.error(f"Error fetching historical min/max for {symbol}: {e}")
+    return None, None
+
+async def check_and_resolve_hit_bet(p, current_price) -> bool:
+    """Checks if a binary hit bet (YES/NO) has met its target level during its lifetime."""
+    symbol = p['symbol'].upper()
+    pyth_id = p['pyth_id']
+    ref = p['ref_price']
+    direction = p['direction'].upper() # 'YES' or 'NO'
+    
+    try:
+        created_dt = datetime.fromisoformat(p['created_at'])
+        et_tz = pytz.timezone('US/Eastern')
+        if created_dt.tzinfo is None:
+            created_dt = et_tz.localize(created_dt)
+        created_ts = int(created_dt.timestamp())
+    except Exception as e:
+        logger.error(f"Error parsing created_at for hit bet {p['id']}: {e}")
+        return False
+        
+    import time
+    current_ts = int(time.time())
+    
+    # 1. Fetch creation price to check if this is hit LOW or hit HIGH bet
+    # If symbol is WTI, use dynamic active contract
+    _, full_symbol = pyth_client.get_pyth_id(symbol)
+    creation_price = await pyth_client.get_historical_candle_price(
+        full_symbol or symbol, pyth_id, created_ts - 120, created_ts + 120, price_type='close'
+    )
+    if not creation_price:
+        # Guess based on current price relative to target
+        creation_price = current_price
+        
+    is_low_bet = creation_price > ref
+    
+    # 2. Get the lowest and highest price reached since creation
+    low_reached, high_reached = await get_historical_min_max(symbol, pyth_id, created_ts, current_ts)
+    
+    # Include current price in the min/max checks
+    if low_reached is None: low_reached = current_price
+    else: low_reached = min(low_reached, current_price)
+    
+    if high_reached is None: high_reached = current_price
+    else: high_reached = max(high_reached, current_price)
+    
+    # 3. Check if target was hit
+    has_hit = False
+    if is_low_bet:
+        if low_reached <= ref:
+            has_hit = True
+    else:
+        if high_reached >= ref:
+            has_hit = True
+            
+    # 4. Resolve the position if target was hit
+    if has_hit:
+        is_win = (direction == 'YES')
+        result_str = "KAZANDI 🟢" if is_win else "KAYBETTİ 🔴"
+        hit_price_reached = low_reached if is_low_bet else high_reached
+        
+        msg = (
+            f"🏁 <b>BİNARY HEDEF VURULDU: {symbol} {direction}</b>\n\n"
+            f"<b>Sonuç:</b> {result_str}\n"
+            f"<b>Hedef Seviye:</b> ${ref:.4f}\n"
+            f"<b>Görülen Uç Fiyat:</b> ${hit_price_reached:.4f}\n"
+            f"<b>Açıklama:</b> Fiyat hedef seviyeye başarıyla temas etti!"
+        )
+        await send_notification(msg)
+        await database.close_position(p['id'])
+        return True
+        
+    return False
+
+
 async def check_prices_loop():
     logger.info("Starting Up/Down Tracker Engine...")
     await send_notification(
@@ -688,6 +784,12 @@ async def check_prices_loop():
                 current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
                 if not current_price:
                     continue
+
+                # Check binary hit bets (YES/NO) resolution
+                if p['direction'].upper() in ('YES', 'NO'):
+                    resolved = await check_and_resolve_hit_bet(p, current_price)
+                    if resolved:
+                        continue
 
                 # Check for rapid direction flips (UP→DOWN or DOWN→UP)
                 await _check_direction_flip(p, current_price)
