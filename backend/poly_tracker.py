@@ -186,7 +186,7 @@ async def fetch_wallet_positions():
         return None
 
 
-async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, title: str, ref_price: float = None):
+async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, title: str, ref_price: float = None, asset_id: str = ""):
     """Resolves price and adds position to our tracking system."""
     pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
     if not pyth_id:
@@ -218,7 +218,8 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
         ref_price=ref_price,
         ref_timestamp=to_ts,
         created_at=now_str,
-        title=title
+        title=title,
+        asset_id=asset_id
     )
     
     # Get current price for notification
@@ -272,6 +273,10 @@ async def sync_positions_loop():
             existing = await database.get_active_positions()
             existing_symbols = {(p['symbol'], p['direction']) for p in existing}
             
+            # Get all positions to avoid importing already resolved ones
+            all_positions = await database.get_all_positions()
+            tracked_assets = {p['asset_id'] for p in all_positions if p.get('asset_id')}
+            
             # Track what is actively held in the Polymarket wallet
             wallet_active_keys = set()
             
@@ -317,6 +322,12 @@ async def sync_positions_loop():
                     continue
                     
                 db_direction = f"OPEN_{direction}" if bet_type == 'open' else direction
+                asset_id = pos.get('asset', '')
+                
+                # If this specific token has been tracked previously (active or closed), skip duplicate import
+                if asset_id and asset_id in tracked_assets:
+                    wallet_active_keys.add((symbol, db_direction))
+                    continue
                 
                 # Check if the resolution time has already passed today
                 et_tz = pytz.timezone('US/Eastern')
@@ -335,7 +346,7 @@ async def sync_positions_loop():
                 # If it is already tracked, we still count it in wallet_active_keys to keep tracking active
                 if (symbol, db_direction) in existing_symbols:
                     wallet_active_keys.add((symbol, db_direction))
-                    await database.update_position_title_if_empty(symbol, db_direction, title)
+                    await database.update_position_metadata_if_empty(symbol, db_direction, title, asset_id)
                     continue
                     
                 # If it's expired and not yet tracked, do NOT track it!
@@ -346,7 +357,7 @@ async def sync_positions_loop():
                 wallet_active_keys.add((symbol, db_direction))
                 
                 logger.info(f"Auto-tracking new position: {symbol} {db_direction} from Polymarket")
-                await _add_position_from_poly(symbol, direction, bet_type, title, ref_price=ref_price_val)
+                await _add_position_from_poly(symbol, direction, bet_type, title, ref_price=ref_price_val, asset_id=asset_id)
             
             # Clean up positions that are active locally but missing from the Polymarket wallet
             for p in existing:

@@ -19,13 +19,20 @@ async def init_db():
                 status TEXT DEFAULT 'active', -- 'active' or 'closed'
                 last_warning_distance REAL DEFAULT 999.0, -- Track progressive warnings
                 created_at TEXT NOT NULL,
-                title TEXT DEFAULT ''
+                title TEXT DEFAULT '',
+                asset_id TEXT DEFAULT ''
             )
         """)
         
-        # Try to add title column if table already exists without it
+        # Try to add title and asset_id columns if table already exists without them
         try:
             await db.execute("ALTER TABLE positions ADD COLUMN title TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass # Column already exists
+            
+        try:
+            await db.execute("ALTER TABLE positions ADD COLUMN asset_id TEXT DEFAULT ''")
             await db.commit()
         except Exception:
             pass # Column already exists
@@ -74,13 +81,13 @@ async def init_db():
 
 # --- Positions ---
 
-async def add_position(symbol: str, pyth_id: str, direction: str, ref_price: float, ref_timestamp: int, created_at: str, title: str = ""):
+async def add_position(symbol: str, pyth_id: str, direction: str, ref_price: float, ref_timestamp: int, created_at: str, title: str = "", asset_id: str = ""):
     async with aiosqlite.connect(DB_FILE) as db:
         cursor = await db.execute(
             """INSERT INTO positions 
-               (symbol, pyth_id, direction, ref_price, ref_timestamp, status, created_at, title) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (symbol, pyth_id, direction, ref_price, ref_timestamp, 'active', created_at, title)
+               (symbol, pyth_id, direction, ref_price, ref_timestamp, status, created_at, title, asset_id) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (symbol, pyth_id, direction, ref_price, ref_timestamp, 'active', created_at, title, asset_id)
         )
         await db.commit()
         return cursor.lastrowid
@@ -89,6 +96,13 @@ async def get_active_positions():
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM positions WHERE status = 'active'") as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_all_positions():
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM positions") as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -110,11 +124,14 @@ async def delete_position(position_id: int):
         await db.execute("DELETE FROM positions WHERE id = ?", (position_id,))
         await db.commit()
 
-async def update_position_title_if_empty(symbol: str, direction: str, title: str):
+async def update_position_metadata_if_empty(symbol: str, direction: str, title: str, asset_id: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
-            "UPDATE positions SET title = ? WHERE symbol = ? AND direction = ? AND (title IS NULL OR title = '') AND status = 'active'",
-            (title, symbol, direction)
+            """UPDATE positions 
+               SET title = CASE WHEN (title IS NULL OR title = '') THEN ? ELSE title END,
+                   asset_id = CASE WHEN (asset_id IS NULL OR asset_id = '') THEN ? ELSE asset_id END
+               WHERE symbol = ? AND direction = ? AND status = 'active'""",
+            (title, asset_id, symbol, direction)
         )
         await db.commit()
 
