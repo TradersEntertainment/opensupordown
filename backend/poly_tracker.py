@@ -228,11 +228,29 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
     if current_price:
         diff_pct = ((current_price - ref_price) / ref_price) * 100
     
-    is_up_bet = direction in ('UP', 'YES')
-    is_winning = (is_up_bet and current_price and current_price > ref_price) or \
-                 (not is_up_bet and current_price and current_price < ref_price)
+    is_winning = False
+    if current_price:
+        try:
+            from tracker_engine import is_position_winning
+            p_mock = {
+                'symbol': symbol,
+                'direction': db_direction,
+                'ref_price': ref_price,
+                'created_at': now_str,
+                'title': title,
+                'pyth_id': pyth_id
+            }
+            is_winning = await is_position_winning(p_mock, current_price)
+        except Exception as e:
+            logger.error(f"Error calculating is_winning for new position: {e}")
+            is_up_bet = direction in ('UP', 'YES')
+            is_winning = (is_up_bet and current_price > ref_price) or \
+                         (not is_up_bet and current_price < ref_price)
+                         
     status = "KAZANIYOR 🟢" if is_winning else "KAYBEDİYOR 🔴"
     current_price_str = f"${current_price:.4f}" if current_price else "Bilinmiyor"
+    
+    ref_label = "Hedef Seviye" if direction in ('YES', 'NO') else "Referans (Dünkü Kapanış)"
     
     msg = (
         f"🔄 <b>Otomatik Takip: {symbol} {db_direction}</b>\n"
@@ -240,7 +258,7 @@ async def _add_position_from_poly(symbol: str, direction: str, bet_type: str, ti
         f"<b>Durum:</b> {status}\n"
         f"<b>Anlık:</b> {current_price_str}\n"
         f"<b>Fark:</b> %{diff_pct:.2f}\n"
-        f"<b>Referans (Dünkü Kapanış):</b> ${ref_price:.4f}"
+        f"<b>{ref_label}:</b> ${ref_price:.4f}"
     )
     await send_notification(msg)
     return True
