@@ -211,72 +211,31 @@ def get_pyth_id(symbol_name: str) -> str:
 
 def get_previous_close_times(symbol: str) -> tuple[int, int]:
     """
-    Calculates the 'from' and 'to' Unix timestamps for the previous trading day's final 1-minute candle.
-    Stocks: 15:59 ET - 16:00 ET (22:59 - 23:00 TR)
-    Commodities: 16:59 ET - 17:00 ET (23:59 - 24:00 TR)
-    Returns (from_ts, to_ts)
+    Calculates the 'from' and 'to' Unix timestamps to find the previous trading day's daily candle.
+    By looking back 7 days, we automatically skip weekends and market holidays like Juneteenth.
     """
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
     
-    # Determine close hour based on asset type
-    is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
-    close_hour = 17 if is_commodity else 16
+    # Span the last 7 days to robustly handle weekends and extended holidays
+    from_dt = now_et - timedelta(days=7)
     
-    # Start checking from yesterday
-    target_date = now_et - timedelta(days=1)
-    
-    # If target_date is Sunday (6) or Saturday (5), go back to Friday
-    while target_date.weekday() >= 5:
-        target_date -= timedelta(days=1)
-        
-    # We want to cover the whole day so resolution="D" returns the daily candle
-    candle_start_dt = et_tz.localize(datetime(
-        target_date.year, 
-        target_date.month, 
-        target_date.day, 
-        0, 0, 0
+    # We want the close of the PREVIOUS day, so 'to_dt' is yesterday 23:59:59
+    yesterday_dt = now_et - timedelta(days=1)
+    to_dt = et_tz.localize(datetime(
+        yesterday_dt.year, 
+        yesterday_dt.month, 
+        yesterday_dt.day, 
+        23, 59, 59
     ))
     
-    candle_end_dt = et_tz.localize(datetime(
-        target_date.year, 
-        target_date.month, 
-        target_date.day, 
-        close_hour, 0, 0
-    ))
-    
-    return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())
+    return int(from_dt.timestamp()), int(to_dt.timestamp())
 
 def get_previous_open_times(symbol: str) -> tuple[int, int]:
     """
-    Calculates the 'from' and 'to' Unix timestamps for the current/previous trading day's 09:30 ET 1-minute candle.
-    Stocks: 09:30 ET - 09:31 ET (16:30 - 16:31 TR)
+    Returns the same window as get_previous_close_times, for symmetry if needed.
     """
-    et_tz = pytz.timezone('US/Eastern')
-    now_et = datetime.now(et_tz)
-    
-    target_date = now_et
-    # If before 09:30 ET today, or if it's weekend, go back to previous trading day
-    if now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30) or now_et.weekday() >= 5:
-        target_date -= timedelta(days=1)
-        while target_date.weekday() >= 5:
-            target_date -= timedelta(days=1)
-            
-    candle_start_dt = et_tz.localize(datetime(
-        target_date.year, 
-        target_date.month, 
-        target_date.day, 
-        0, 0, 0
-    ))
-    
-    candle_end_dt = et_tz.localize(datetime(
-        target_date.year, 
-        target_date.month, 
-        target_date.day, 
-        16, 0, 0
-    ))
-    
-    return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())
+    return get_previous_close_times(symbol)
 
 import asyncio
 
@@ -321,7 +280,7 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
                 target_key = "c" if price_type == 'close' else "o"
                 
                 if data.get("s") == "ok" and target_key in data and len(data[target_key]) > 0:
-                    price = data[target_key][-1] if price_type == 'close' else data[target_key][0]
+                    price = data[target_key][-1]
                     res_price = float(price)
                     _historical_price_cache[cache_key] = res_price
                     return res_price
