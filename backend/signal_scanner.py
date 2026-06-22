@@ -1571,29 +1571,54 @@ def parse_market_question(question: str) -> tuple[str, float, str]:
 
 async def fetch_active_binary_markets() -> list:
     """
-    Search and fetch all active binary markets (hit, closes-above, up/down, etc.) from Gamma API.
-    Queries by asset names directly using asyncio.gather for speed.
+    Fetch exact daily Up/Down binary markets using predictably generated slugs based on today's date.
+    Bypasses Gamma API's unreliable public-search entirely.
     """
-    queries = list(set(list(ASSET_FUZZY_MAP.keys()) + SCAN_WATCHLIST))
+    et_tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et_tz)
+    
+    # Month name full (lowercase), Day (no zero padding), Year
+    month_str = now_et.strftime("%B").lower()
+    day_str = str(now_et.day)
+    year_str = now_et.strftime("%Y")
+    date_suffix = f"-on-{month_str}-{day_str}-{year_str}"
+    
+    slugs = []
+    for symbol in SCAN_WATCHLIST:
+        prefix = symbol.lower()
+        if symbol == "XAU":
+            prefix = "xauusd"
+        elif symbol == "XAG":
+            prefix = "xagusd"
+        elif symbol == "DIA":
+            prefix = "djia"
+            
+        slugs.append(f"{prefix}-up-or-down{date_suffix}")
+        
+        # Add SPX variants for SPY
+        if symbol == "SPY":
+            slugs.append(f"spx-up-or-down{date_suffix}")
+            slugs.append(f"spx-opens-up-or-down{date_suffix}")
+            
     all_markets = []
     seen_market_ids = set()
     
     sem = asyncio.Semaphore(10)
     
-    async def fetch_q(client, q):
-        url = f"{GAMMA_API}/public-search"
-        params = {"q": q, "active": "true", "closed": "false", "limit": 20}
+    async def fetch_slug(client, slug):
+        url = f"{GAMMA_API}/events"
+        params = {"slug": slug}
         try:
             async with sem:
                 resp = await client.get(url, params=params, timeout=10.0)
                 if resp.status_code == 200:
-                    return resp.json().get("events", [])
+                    return resp.json()
         except Exception as e:
-            logger.error(f"Error fetching search query {q}: {e}")
+            logger.error(f"Error fetching slug {slug}: {e}")
         return []
 
     async with httpx.AsyncClient() as client:
-        tasks = [fetch_q(client, q) for q in queries]
+        tasks = [fetch_slug(client, slug) for slug in slugs]
         results = await asyncio.gather(*tasks)
         
         for events in results:
