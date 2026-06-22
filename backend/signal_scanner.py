@@ -50,6 +50,33 @@ SCAN_WATCHLIST = [
     "RUT", "NYA"
 ]
 
+ASSET_FUZZY_MAP = {
+    "PALANTIR": "PLTR",
+    "TESLA": "TSLA",
+    "NVIDIA": "NVDA",
+    "APPLE": "AAPL",
+    "AMAZON": "AMZN",
+    "GOOGLE": "GOOGL",
+    "ALPHABET": "GOOGL",
+    "MICROSOFT": "MSFT",
+    "NETFLIX": "NFLX",
+    "COINBASE": "COIN",
+    "ROBINHOOD": "HOOD",
+    "AIRBNB": "ABNB",
+    "ROCKET LAB": "RKLB",
+    "MICRON": "MU",
+    "CRUDE OIL": "WTI",
+    "GOLD": "XAU",
+    "SILVER": "XAG",
+    "NATURAL GAS": "NG",
+    "HANG SENG": "HSI",
+    "NIKKEI": "NKY",
+    "FTSE": "UKX",
+    "DOW JONES": "DIA",
+    "RUSSELL": "RUT",
+    "S&P 500": "SPY"
+}
+
 # Slug → symbol mapping for Polymarket event discovery
 SLUG_TO_SYMBOL = {
     "spx-up-or-down": "SPY",
@@ -648,10 +675,11 @@ async def fetch_polymarket_events() -> dict:
                 up_token = down_token = ""
                 
                 for i, out in enumerate(outcomes):
-                    if out.upper() == "YES":
+                    out_upper = out.upper()
+                    if out_upper in ("YES", "UP"):
                         up_price = float(prices[i]) if i < len(prices) else 0.0
                         up_token = tokens[i] if i < len(tokens) else ""
-                    elif out.upper() == "NO":
+                    elif out_upper in ("NO", "DOWN"):
                         down_price = float(prices[i]) if i < len(prices) else 0.0
                         down_token = tokens[i] if i < len(tokens) else ""
                         
@@ -1495,33 +1523,7 @@ def parse_market_question(question: str) -> tuple[str, float, str]:
             
     # 2. Fuzzy mapping of common names
     if not matched_symbol:
-        fuzzy_map = {
-            "PALANTIR": "PLTR",
-            "TESLA": "TSLA",
-            "NVIDIA": "NVDA",
-            "APPLE": "AAPL",
-            "AMAZON": "AMZN",
-            "GOOGLE": "GOOGL",
-            "ALPHABET": "GOOGL",
-            "MICROSOFT": "MSFT",
-            "NETFLIX": "NFLX",
-            "COINBASE": "COIN",
-            "ROBINHOOD": "HOOD",
-            "AIRBNB": "ABNB",
-            "ROCKET LAB": "RKLB",
-            "MICRON": "MU",
-            "CRUDE OIL": "WTI",
-            "GOLD": "XAU",
-            "SILVER": "XAG",
-            "NATURAL GAS": "NG",
-            "HANG SENG": "HSI",
-            "NIKKEI": "NKY",
-            "FTSE": "UKX",
-            "DOW JONES": "DIA",
-            "RUSSELL": "RUT",
-            "S&P 500": "SPY"
-        }
-        for name, sym in fuzzy_map.items():
+        for name, sym in ASSET_FUZZY_MAP.items():
             if name in q:
                 matched_symbol = sym
                 break
@@ -1535,6 +1537,7 @@ def parse_market_question(question: str) -> tuple[str, float, str]:
     
     # Match decimal numbers immediately following trigger words (HIT, TOUCH, ABOVE, BELOW, EXCEED, LEVEL)
     # Allows optional parenthesis (e.g. "hit (HIGH) $150") and optional dollar sign
+    m_type = None
     match = re.search(r"(HIT|TOUCH|ABOVE|BELOW|EXCEED|LEVEL)\s*(?:\([A-Z]+\)\s*)?\$?(\d+(?:\.\d+)?)\s*(K)?", q_clean)
     if match:
         try:
@@ -1545,19 +1548,22 @@ def parse_market_question(question: str) -> tuple[str, float, str]:
             threshold = val
         except ValueError:
             pass
+    elif "UP OR DOWN" in q_clean:
+        threshold = -1.0
+        m_type = "UP_DOWN"
             
     if threshold is None:
         return None, None, None
         
-    # Identify Market Type
-    m_type = None
-    if "HIT" in q or "TOUCH" in q:
-        m_type = "HIT"
-    elif "CLOSES ABOVE" in q or "CLOSE ABOVE" in q or "EXCEED" in q or "ABOVE" in q:
-        m_type = "CLOSES_ABOVE"
-    elif "CLOSES BELOW" in q or "CLOSE BELOW" in q or "BELOW" in q:
-        m_type = "CLOSES_BELOW"
-        
+    # Identify Market Type if not already set
+    if not m_type:
+        if "HIT" in q or "TOUCH" in q:
+            m_type = "HIT"
+        elif "CLOSES ABOVE" in q or "CLOSE ABOVE" in q or "EXCEED" in q or "ABOVE" in q:
+            m_type = "CLOSES_ABOVE"
+        elif "CLOSES BELOW" in q or "CLOSE BELOW" in q or "BELOW" in q:
+            m_type = "CLOSES_BELOW"
+            
     if not m_type:
         m_type = "HIT"
         
@@ -1565,40 +1571,42 @@ def parse_market_question(question: str) -> tuple[str, float, str]:
 
 async def fetch_active_binary_markets() -> list:
     """
-    Search and fetch all active binary markets (hit, closes-above, etc.) from Gamma API.
+    Search and fetch all active binary markets (hit, closes-above, up/down, etc.) from Gamma API.
+    Queries by asset names directly using asyncio.gather for speed.
     """
-    queries = ["hit", "closes above", "closes below", "touches", "exceed"]
+    queries = list(set(list(ASSET_FUZZY_MAP.keys()) + SCAN_WATCHLIST))
     all_markets = []
     seen_market_ids = set()
     
-    async with httpx.AsyncClient() as client:
-        for q in queries:
-            url = f"{GAMMA_API}/public-search"
-            params = {
-                "q": q,
-                "active": "true",
-                "closed": "false",
-                "limit": 50
-            }
-            try:
+    sem = asyncio.Semaphore(10)
+    
+    async def fetch_q(client, q):
+        url = f"{GAMMA_API}/public-search"
+        params = {"q": q, "active": "true", "closed": "false", "limit": 20}
+        try:
+            async with sem:
                 resp = await client.get(url, params=params, timeout=10.0)
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                events = data.get("events", [])
-                for ev in events:
-                    markets = ev.get("markets", [])
-                    for m in markets:
-                        m_id = m.get("id")
-                        if m_id and m_id not in seen_market_ids:
-                            if m.get("active") and not m.get("closed"):
-                                seen_market_ids.add(m_id)
-                                m["event_slug"] = ev.get("slug", "")
-                                all_markets.append(m)
-            except Exception as e:
-                logger.error(f"Error fetching search query {q}: {e}")
-            await asyncio.sleep(0.2)
-            
+                if resp.status_code == 200:
+                    return resp.json().get("events", [])
+        except Exception as e:
+            logger.error(f"Error fetching search query {q}: {e}")
+        return []
+
+    async with httpx.AsyncClient() as client:
+        tasks = [fetch_q(client, q) for q in queries]
+        results = await asyncio.gather(*tasks)
+        
+        for events in results:
+            for ev in events:
+                markets = ev.get("markets", [])
+                for m in markets:
+                    m_id = m.get("id")
+                    if m_id and m_id not in seen_market_ids:
+                        if m.get("active") and not m.get("closed"):
+                            seen_market_ids.add(m_id)
+                            m["event_slug"] = ev.get("slug", "")
+                            all_markets.append(m)
+                            
     return all_markets
 
 def analyze_move_risk(symbol: str, required_move: float, direction: str, minutes_to_close: int) -> dict:
