@@ -241,6 +241,9 @@ def get_previous_open_times(symbol: str) -> tuple[int, int]:
 
 import asyncio
 
+# Global semaphore to strictly limit concurrency to Pyth Benchmarks API to prevent 429s
+_tv_api_sem = asyncio.Semaphore(2)
+
 async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
     """
     Fetches the exact 'Close' or 'Open' price of the 1-minute candle from Pyth's TV history API.
@@ -252,7 +255,6 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
     if cache_key in _historical_price_cache:
         cached_price = _historical_price_cache[cache_key]
         if cached_price is not None:
-            logger.info(f"Using cached historical price for {full_symbol}: {cached_price}")
             return cached_price
 
     url = f"{BENCHMARKS_URL}/shims/tradingview/history"
@@ -267,7 +269,10 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(url, params=params, timeout=10.0)
+                async with _tv_api_sem:
+                    resp = await client.get(url, params=params, timeout=10.0)
+                    # Small artificial delay to prevent burst limit
+                    await asyncio.sleep(0.2)
                 
                 if resp.status_code == 429:
                     delay = 1.5 ** attempt
