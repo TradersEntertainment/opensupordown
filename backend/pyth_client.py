@@ -212,22 +212,24 @@ def get_pyth_id(symbol_name: str) -> str:
 def get_previous_close_times(symbol: str) -> tuple[int, int]:
     """
     Calculates the 'from' and 'to' Unix timestamps to find the previous trading day's daily candle.
-    By looking back 7 days, we automatically skip weekends and market holidays like Juneteenth.
+    By looking back 7 days and strictly cutting off at yesterday 23:59:59 UTC, we skip
+    today's live candle, weekends, and market holidays.
     """
-    et_tz = pytz.timezone('US/Eastern')
-    now_et = datetime.now(et_tz)
+    # Use UTC to strictly align with Pyth's 00:00:00 UTC daily candle timestamps
+    now_utc = datetime.now(pytz.utc)
     
     # Span the last 7 days to robustly handle weekends and extended holidays
-    from_dt = now_et - timedelta(days=7)
+    from_dt = now_utc - timedelta(days=7)
     
-    # We want the close of the PREVIOUS day, so 'to_dt' is yesterday 23:59:59
-    yesterday_dt = now_et - timedelta(days=1)
-    to_dt = et_tz.localize(datetime(
-        yesterday_dt.year, 
-        yesterday_dt.month, 
-        yesterday_dt.day, 
-        23, 59, 59
-    ))
+    # We want to strictly exclude TODAY's daily candle (which starts at 00:00:00 UTC today).
+    # So we set 'to_dt' to exactly 1 second before today's UTC midnight.
+    to_dt = datetime(
+        now_utc.year, 
+        now_utc.month, 
+        now_utc.day, 
+        0, 0, 0,
+        tzinfo=pytz.utc
+    ) - timedelta(seconds=1)
     
     return int(from_dt.timestamp()), int(to_dt.timestamp())
 
