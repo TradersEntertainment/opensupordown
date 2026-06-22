@@ -615,8 +615,8 @@ def analyze_reversal_risk(
 
 async def fetch_polymarket_events() -> dict:
     """
-    Fetch active Up/Down events from Polymarket Gamma API by dynamically generating slugs.
-    Returns: {symbol: {up_price, down_price, up_token_id, down_token_id, slug}}
+    Fetch active binary events from Polymarket Gamma API by utilizing the new fetch_active_binary_markets.
+    Returns: {symbol: {"up_price": ..., "down_price": ..., "up_token_id": ..., "down_token_id": ..., "slug": ...}}
     """
     global _poly_cache, _last_poly_time
 
@@ -625,97 +625,46 @@ async def fetch_polymarket_events() -> dict:
         return _poly_cache
 
     try:
-        et_tz = pytz.timezone("US/Eastern")
-        now_et = datetime.now(et_tz)
-        
-        # Generate the standard monthly format (e.g. "may-28-2026")
-        month_name = now_et.strftime("%B").lower()
-        day = now_et.day
-        year = now_et.year
-        
         results = {}
-
-        async def fetch_single_symbol(symbol: str):
-            ticker = symbol.lower()
-            slug = f"{ticker}-up-or-down-on-{month_name}-{day}-{year}"
-            
-            slugs_to_try = [slug]
-            if symbol == "SPY":
-                slugs_to_try.append(f"spx-up-or-down-on-{month_name}-{day}-{year}")
-                slugs_to_try.append(f"sp-500-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "OPEN":
-                slugs_to_try.append(f"opendoor-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "XAU":
-                slugs_to_try.append(f"xauusd-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "XAG":
-                slugs_to_try.append(f"xagusd-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "HSI":
-                slugs_to_try.append(f"hang-seng-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "NG":
-                slugs_to_try.append(f"natural-gas-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "NKY":
-                slugs_to_try.append(f"nikkei-225-up-or-down-on-{month_name}-{day}-{year}")
-                slugs_to_try.append(f"nik-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "UKX":
-                slugs_to_try.append(f"ftse-100-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "DIA":
-                slugs_to_try.append(f"dow-jones-up-or-down-on-{month_name}-{day}-{year}")
-                slugs_to_try.append(f"djia-up-or-down-on-{month_name}-{day}-{year}")
-                slugs_to_try.append(f"dow-up-or-down-on-{month_name}-{day}-{year}")
-            elif symbol == "RUT":
-                slugs_to_try.append(f"russell-2000-up-or-down-on-{month_name}-{day}-{year}")
-
-            async with httpx.AsyncClient() as client:
-                for s in slugs_to_try:
-                    url = f"{GAMMA_API}/events/slug/{s}"
+        markets = await fetch_active_binary_markets()
+        
+        for market in markets:
+            question = market.get("question", "")
+            symbol, threshold, m_type = parse_market_question(question)
+            if not symbol or threshold is None or not m_type:
+                continue
+                
+            if symbol not in results:
+                outcomes = json.loads(market.get("outcomes", "[]"))
+                prices = json.loads(market.get("outcomePrices", "[]"))
+                tokens = market.get("clobTokenIds", "[]")
+                if isinstance(tokens, str):
                     try:
-                        resp = await client.get(url, timeout=5.0)
-                        if resp.status_code != 200:
-                            continue
-                            
-                        event = resp.json()
-                        markets = event.get("markets", [])
-                        if not markets:
-                            continue
-
-                        market = markets[0]
-                        outcomes = json.loads(market.get("outcomes", "[]"))
-                        prices = json.loads(market.get("outcomePrices", "[]"))
-                        token_ids = json.loads(market.get("clobTokenIds", "[]"))
-
-                        if len(outcomes) < 2 or len(prices) < 2:
-                            continue
-
-                        up_idx = down_idx = None
-                        for i, o in enumerate(outcomes):
-                            if o.lower() == "up":
-                                up_idx = i
-                            elif o.lower() == "down":
-                                down_idx = i
-
-                        if up_idx is None or down_idx is None:
-                            continue
-
-                        results[symbol] = {
-                            "up_price": float(prices[up_idx]),
-                            "down_price": float(prices[down_idx]),
-                            "up_token_id": token_ids[up_idx] if len(token_ids) > up_idx else None,
-                            "down_token_id": token_ids[down_idx] if len(token_ids) > down_idx else None,
-                            "slug": s,
-                        }
-                        break # Found successfully, stop trying other slugs for this symbol
-                    except Exception as e:
-                        logger.debug(f"Error fetching slug {s}: {e}")
-
-        # Fetch all symbols in parallel using a semaphore to avoid rate limit issues
-        sem = asyncio.Semaphore(5)
-        async def fetch_single_symbol_sem(symbol):
-            async with sem:
-                await fetch_single_symbol(symbol)
-
-        tasks = [fetch_single_symbol_sem(symbol) for symbol in SCAN_WATCHLIST]
-        await asyncio.gather(*tasks)
-
+                        tokens = json.loads(tokens)
+                    except:
+                        tokens = []
+                        
+                up_price = down_price = 0.0
+                up_token = down_token = ""
+                
+                for i, out in enumerate(outcomes):
+                    if out.upper() == "YES":
+                        up_price = float(prices[i]) if i < len(prices) else 0.0
+                        up_token = tokens[i] if i < len(tokens) else ""
+                    elif out.upper() == "NO":
+                        down_price = float(prices[i]) if i < len(prices) else 0.0
+                        down_token = tokens[i] if i < len(tokens) else ""
+                        
+                results[symbol] = {
+                    "up_price": up_price,
+                    "down_price": down_price,
+                    "up_token_id": up_token,
+                    "down_token_id": down_token,
+                    "slug": market.get("slug", ""),
+                    "threshold": threshold,
+                    "type": m_type
+                }
+                
         _poly_cache = results
         _last_poly_time = now
         return results
@@ -1492,14 +1441,11 @@ async def run_manual_scan() -> list:
             return None
 
     # Run in parallel using asyncio.gather with concurrency control to prevent API rate limiting (429s)
-    sem = asyncio.Semaphore(3)
-    async def scan_single_symbol_sem(symbol):
-        async with sem:
-            await asyncio.sleep(0.05) # Tiny stagger to space out the parallel requests
-            return await scan_single_symbol(symbol)
-
-    tasks = [scan_single_symbol_sem(symbol) for symbol in SCAN_WATCHLIST]
-    scanned_results = await asyncio.gather(*tasks)
+    scanned_results = []
+    for symbol in SCAN_WATCHLIST:
+        res = await scan_single_symbol(symbol)
+        scanned_results.append(res)
+        await asyncio.sleep(0.5)
 
     # Filter out None results
     filtered_results = [r for r in scanned_results if r is not None]

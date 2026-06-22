@@ -230,20 +230,19 @@ def get_previous_close_times(symbol: str) -> tuple[int, int]:
     while target_date.weekday() >= 5:
         target_date -= timedelta(days=1)
         
-    # We want ONLY the 15:59 (or 16:59) candle.
-    # Using 15:59:00 to 15:59:59 ensures Pyth returns exactly 1 candle.
+    # We want to cover the whole day so resolution="D" returns the daily candle
     candle_start_dt = et_tz.localize(datetime(
         target_date.year, 
         target_date.month, 
         target_date.day, 
-        close_hour - 1, 59, 0
+        0, 0, 0
     ))
     
     candle_end_dt = et_tz.localize(datetime(
         target_date.year, 
         target_date.month, 
         target_date.day, 
-        close_hour - 1, 59, 59
+        close_hour, 0, 0
     ))
     
     return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())
@@ -267,14 +266,14 @@ def get_previous_open_times(symbol: str) -> tuple[int, int]:
         target_date.year, 
         target_date.month, 
         target_date.day, 
-        9, 30, 0
+        0, 0, 0
     ))
     
     candle_end_dt = et_tz.localize(datetime(
         target_date.year, 
         target_date.month, 
         target_date.day, 
-        9, 30, 59
+        16, 0, 0
     ))
     
     return int(candle_start_dt.timestamp()), int(candle_end_dt.timestamp())
@@ -298,7 +297,7 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
     url = f"{BENCHMARKS_URL}/shims/tradingview/history"
     params = {
         "symbol": full_symbol,
-        "resolution": "1", 
+        "resolution": "D", 
         "from": from_ts,
         "to": to_ts
     }
