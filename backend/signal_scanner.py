@@ -1440,12 +1440,15 @@ async def run_manual_scan() -> list:
             logger.error(f"Error scanning single symbol {symbol} manually: {e}")
             return None
 
-    # Run in parallel using asyncio.gather with concurrency control to prevent API rate limiting (429s)
-    scanned_results = []
-    for symbol in SCAN_WATCHLIST:
-        res = await scan_single_symbol(symbol)
-        scanned_results.append(res)
-        await asyncio.sleep(0.5)
+    # Run in parallel using asyncio.gather with a semaphore to prevent API rate limiting (429s) while maximizing speed
+    sem = asyncio.Semaphore(4)
+    
+    async def sem_scan(sym):
+        async with sem:
+            return await scan_single_symbol(sym)
+            
+    tasks = [sem_scan(sym) for sym in SCAN_WATCHLIST]
+    scanned_results = await asyncio.gather(*tasks)
 
     # Filter out None results
     filtered_results = [r for r in scanned_results if r is not None]
