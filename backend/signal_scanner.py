@@ -1042,14 +1042,14 @@ async def background_scan_loop():
             now_et = datetime.now(et_tz)
             total_minutes = now_et.hour * 60 + now_et.minute
 
-            # Determine if we're in market hours (9:30 AM - 5:00 PM ET on weekdays)
-            is_market_hours = (
+            # Active session: 4:00 AM - 8:00 PM ET on weekdays (Pre-market + Regular + Post-market)
+            is_active_session = (
                 now_et.weekday() < 5
-                and 570 <= total_minutes < 1020
+                and 240 <= total_minutes < 1200
             )
-            scan_interval = 60 if is_market_hours else 120
+            scan_interval = 30 if is_active_session else 120
 
-            logger.info(f"Background scan starting... ({'market hours' if is_market_hours else 'off hours'}, interval={scan_interval}s)")
+            logger.info(f"Background scan starting... ({'active session' if is_active_session else 'off hours'}, interval={scan_interval}s)")
 
             # Determine time context (same logic as run_manual_scan)
             is_off_hours = False
