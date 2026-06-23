@@ -480,9 +480,44 @@ async def get_binance_perpetual_price(symbol: str) -> float:
 _wti_binance_basis = 0.0
 _xau_binance_basis = 0.0
 
+async def get_yahoo_prepost_price(symbol: str) -> float:
+    """
+    Fetches the real-time pre-market or post-market price of a stock/ETF from Yahoo Finance's chart API.
+    """
+    symbol_up = symbol.upper()
+    yahoo_symbol = symbol_up
+    if symbol_up == "HSI":
+        yahoo_symbol = "EWH"
+    elif symbol_up == "RUT":
+        yahoo_symbol = "IWM"
+    elif symbol_up == "DAX":
+        yahoo_symbol = "EWG"
+        
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?includePrePost=true&interval=1m&range=1d"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "chart" in data and "result" in data["chart"] and data["chart"]["result"]:
+                    chart_result = data["chart"]["result"][0]
+                    indicators = chart_result.get("indicators", {}).get("quote", [{}])[0]
+                    close_prices = indicators.get("close", [])
+                    if close_prices:
+                        # Find the last non-None close price
+                        last_close = next((c for c in reversed(close_prices) if c is not None), None)
+                        if last_close is not None:
+                            logger.info(f"Fetched pre/post-market Yahoo price for {symbol_up} ({yahoo_symbol}): ${last_close:.2f}")
+                            return float(last_close)
+    except Exception as e:
+        logger.warning(f"Failed to fetch Yahoo price for {symbol_up}: {e}")
+    return None
+
 async def get_active_price(symbol: str, default_pyth_id: str) -> float:
     """
-    Smart price fetcher that prefers .PRE feeds for stocks during pre-market,
+    Smart price fetcher that prefers Yahoo Finance during stock pre/post-market hours,
     and fallbacks to calibrated 7/24 Binance Perpetual prices for Commodities (WTI/Gold) 
     when official CME markets are closed (using basis spread adjustments).
     """
@@ -492,7 +527,7 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
     
-    is_commodity = any(c in symbol_up for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+    is_commodity = any(c in symbol_up for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER", "NG"])
     
     # 1. 7/24 Commodity Alpha check (Binance perpetuals during weekends or off-hours daily breaks)
     if is_commodity:
@@ -518,13 +553,17 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
                 logger.info(f"Commodity {symbol_up} market closed. Live Binance: ${binance_price:.2f}, Basis: ${basis:+.4f} -> Real Adjusted CME Price: ${adjusted_price:.2f}")
                 return adjusted_price
                 
-    # 2. Pre-market stock logic - DISABLED
-    # Pyth's .PRE feeds return stale prices from previous sessions (e.g. PLTR .PRE=$134 vs actual premarket=$119).
-    # Regular Pyth feeds already update during extended hours, so we use those instead.
-    # total_minutes = now_et.hour * 60 + now_et.minute
-    # is_premarket = 240 <= total_minutes < 570
-    # if is_premarket and not is_commodity:
-    #     ... .PRE feed logic disabled ...
+    # 2. Extended hours stock logic (Pre-market: 04:00-09:30 ET, Post-market: 16:00-20:00 ET)
+    if not is_commodity:
+        total_minutes = now_et.hour * 60 + now_et.minute
+        # Weekdays only
+        if now_et.weekday() < 5:
+            # Pre-market (4:00 AM - 9:30 AM ET) or Post-market (4:00 PM - 8:00 PM ET)
+            if (240 <= total_minutes < 570) or (960 <= total_minutes < 1200):
+                yahoo_price = await get_yahoo_prepost_price(symbol_up)
+                if yahoo_price:
+                    logger.info(f"Using live Yahoo pre/post-market price for {symbol_up}: ${yahoo_price:.2f}")
+                    return yahoo_price
                     
     # 3. Fetch default active price (official market open)
     official_price = await get_latest_price(default_pyth_id)
