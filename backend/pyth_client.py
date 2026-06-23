@@ -554,9 +554,9 @@ async def get_binance_perpetual_price(symbol: str) -> float:
 _wti_binance_basis = 0.0
 _xau_binance_basis = 0.0
 
-async def get_yahoo_prepost_price(symbol: str) -> float:
+async def get_yahoo_live_price(symbol: str) -> float:
     """
-    Fetches the real-time pre-market or post-market price of a stock/ETF from Yahoo Finance's chart API.
+    Fetches the real-time live price (including pre/post-market and regular hours) of a stock/ETF from Yahoo Finance's chart API.
     """
     symbol_up = symbol.upper()
     yahoo_symbol = symbol_up
@@ -583,7 +583,7 @@ async def get_yahoo_prepost_price(symbol: str) -> float:
                         # Find the last non-None close price
                         last_close = next((c for c in reversed(close_prices) if c is not None), None)
                         if last_close is not None:
-                            logger.info(f"Fetched pre/post-market Yahoo price for {symbol_up} ({yahoo_symbol}): ${last_close:.2f}")
+                            logger.info(f"Fetched live Yahoo price for {symbol_up} ({yahoo_symbol}): ${last_close:.2f}")
                             return float(last_close)
     except Exception as e:
         logger.warning(f"Failed to fetch Yahoo price for {symbol_up}: {e}")
@@ -591,7 +591,7 @@ async def get_yahoo_prepost_price(symbol: str) -> float:
 
 async def get_active_price(symbol: str, default_pyth_id: str) -> float:
     """
-    Smart price fetcher that prefers Yahoo Finance during stock pre/post-market hours,
+    Smart price fetcher that prefers Yahoo Finance for all stock/ETF symbols 24/7,
     and fallbacks to calibrated 7/24 Binance Perpetual prices for Commodities (WTI/Gold) 
     when official CME markets are closed (using basis spread adjustments).
     """
@@ -627,17 +627,11 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
                 logger.info(f"Commodity {symbol_up} market closed. Live Binance: ${binance_price:.2f}, Basis: ${basis:+.4f} -> Real Adjusted CME Price: ${adjusted_price:.2f}")
                 return adjusted_price
                 
-    # 2. Extended hours stock logic (Pre-market: 04:00-09:30 ET, Post-market: 16:00-20:00 ET)
+    # 2. Live stock/ETF price from Yahoo Finance
     if not is_commodity:
-        total_minutes = now_et.hour * 60 + now_et.minute
-        # Weekdays only
-        if now_et.weekday() < 5:
-            # Pre-market (4:00 AM - 9:30 AM ET) or Post-market (4:00 PM - 8:00 PM ET)
-            if (240 <= total_minutes < 570) or (960 <= total_minutes < 1200):
-                yahoo_price = await get_yahoo_prepost_price(symbol_up)
-                if yahoo_price:
-                    logger.info(f"Using live Yahoo pre/post-market price for {symbol_up}: ${yahoo_price:.2f}")
-                    return yahoo_price
+        yahoo_price = await get_yahoo_live_price(symbol_up)
+        if yahoo_price:
+            return yahoo_price
                     
     # 3. Fetch default active price (official market open)
     official_price = await get_latest_price(default_pyth_id)
