@@ -274,18 +274,21 @@ def get_previous_close_times(symbol: str) -> tuple[int, int]:
     # Use UTC to strictly align with Pyth's 00:00:00 UTC daily candle timestamps
     now_utc = datetime.now(pytz.utc)
     
-    # Span the last 7 days to robustly handle weekends and extended holidays
-    from_dt = now_utc - timedelta(days=7)
-    
-    # We want to strictly exclude TODAY's daily candle (which starts at 00:00:00 UTC today).
-    # So we set 'to_dt' to exactly 1 second before today's UTC midnight.
-    to_dt = datetime(
+    # Align to midnight of today UTC
+    today_midnight = datetime(
         now_utc.year, 
         now_utc.month, 
         now_utc.day, 
         0, 0, 0,
         tzinfo=pytz.utc
-    ) - timedelta(seconds=1)
+    )
+    
+    # Span the last 7 days starting from midnight
+    from_dt = today_midnight - timedelta(days=7)
+    
+    # We want to strictly exclude TODAY's daily candle (which starts at 00:00:00 UTC today).
+    # So we set 'to_dt' to exactly 1 second before today's UTC midnight.
+    to_dt = today_midnight - timedelta(seconds=1)
     
     return int(from_dt.timestamp()), int(to_dt.timestamp())
 
@@ -296,17 +299,70 @@ def get_previous_open_times(symbol: str) -> tuple[int, int]:
     return get_previous_close_times(symbol)
 
 import asyncio
+import time
 
-# Global semaphore to strictly limit concurrency to Pyth Benchmarks API to prevent 429s
-# Only 1 concurrent request allowed - Pyth TV API is very strict with rate limits
+# Global rate limit state for Pyth TV History API
 _tv_api_sem = asyncio.Semaphore(1)
+_tv_api_backoff_until = 0.0
+
+async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to_ts: int, max_retries: int = 5) -> dict:
+    """
+    Low-level helper to query Pyth's TV History API.
+    Handles concurrency via semaphore, global rate limit backoff, and retries.
+    """
+    global _tv_api_backoff_until
+    url = f"{BENCHMARKS_URL}/shims/tradingview/history"
+    params = {
+        "symbol": full_symbol,
+        "resolution": resolution,
+        "from": from_ts,
+        "to": to_ts
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            async with _tv_api_sem:
+                # If there's an active backoff, wait for it inside the semaphore
+                now = time.time()
+                if now < _tv_api_backoff_until:
+                    sleep_time = _tv_api_backoff_until - now
+                    logger.warning(f"TV API in backoff. Waiting {sleep_time:.1f}s before request for {full_symbol}...")
+                    await asyncio.sleep(sleep_time)
+                
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, params=params, timeout=15.0)
+                
+                # Check for rate limiting
+                if resp.status_code == 429:
+                    delay = 3.0 * (attempt + 1)
+                    _tv_api_backoff_until = time.time() + delay
+                    logger.warning(f"Rate limited (429) on TV History for {full_symbol}. Backing off for {delay:.1f}s...")
+                    # Delay inside the semaphore so no other concurrent requests are sent
+                    await asyncio.sleep(delay)
+                    continue
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                # Success: add a small mandatory cooldown to prevent burst limit
+                await asyncio.sleep(0.5)
+                return data
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = 2.0 * (attempt + 1)
+                logger.warning(f"Error querying TV History for {full_symbol} (Attempt {attempt+1}/{max_retries}): {e}. Retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"Failed to query TV History for {full_symbol} after {max_retries} attempts: {e}")
+                
+    return None
 
 async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
     """
     Fetches the exact 'Close' or 'Open' price of the 1-minute candle from Pyth's TV history API.
     Falls back to Hermes historical API if TV shim fails.
     Uses in-memory cache to prevent 429 rate limiting.
-    Includes exponential backoff for 429 Too Many Requests.
     """
     cache_key = (full_symbol, from_ts, to_ts, price_type)
     if cache_key in _historical_price_cache:
@@ -314,81 +370,42 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
         if cached_price is not None:
             return cached_price
 
-    url = f"{BENCHMARKS_URL}/shims/tradingview/history"
-    params = {
-        "symbol": full_symbol,
-        "resolution": "D", 
-        "from": from_ts,
-        "to": to_ts
-    }
+    data = await get_tv_history_raw(full_symbol, resolution="D", from_ts=from_ts, to_ts=to_ts)
     
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                async with _tv_api_sem:
-                    resp = await client.get(url, params=params, timeout=10.0)
-                    # Mandatory delay between requests to prevent burst limit
-                    await asyncio.sleep(0.5)
-                
-                if resp.status_code == 429:
-                    delay = 2.0 * (attempt + 1)
-                    logger.warning(f"Rate limited (429) on TV History for {full_symbol}, retrying in {delay:.1f}s...")
-                    await asyncio.sleep(delay)
-                    continue
-                    
-                resp.raise_for_status()
-                data = resp.json()
-                
-                # TV API response: { "s": "ok", "t": [...], "c": [...], "o": [...] }
-                target_key = "c" if price_type == 'close' else "o"
-                
-                if data.get("s") == "ok" and target_key in data and len(data[target_key]) > 0:
-                    price = data[target_key][-1]
-                    res_price = float(price)
-                    _historical_price_cache[cache_key] = res_price
-                    return res_price
-                else:
-                    logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Response: {data.get('s')}. Falling back to Hermes history API...")
-                    clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
-                    target_ts = to_ts if price_type == 'close' else from_ts
-                    fallback_url = f"{HERMES_URL}/updates/price/{target_ts}"
-                    fb_params = {"ids[]": clean_id, "parsed": "true"}
-                    
-                    fb_resp = await client.get(fallback_url, params=fb_params, timeout=5.0)
-                    if fb_resp.status_code == 429:
-                        delay = 1.5 ** attempt
-                        logger.warning(f"Rate limited (429) on Hermes fallback for {full_symbol}, retrying in {delay:.1f}s...")
-                        await asyncio.sleep(delay)
-                        continue
-                        
-                    if fb_resp.status_code == 200:
-                        fb_data = fb_resp.json()
-                        for item in fb_data.get("parsed", []):
-                            if clean_id in item.get("id", ""):
-                                price_info = item.get("price", {})
-                                p_str = price_info.get("price")
-                                e_str = price_info.get("expo")
-                                if p_str and e_str:
-                                    res_price = float(p_str) * (10 ** int(e_str))
-                                    _historical_price_cache[cache_key] = res_price
-                                    return res_price
-                                    
-                    logger.error(f"Fallback to Hermes History failed for {full_symbol} at {target_ts} (Status: {fb_resp.status_code})")
-                    return None
-                    
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                delay = 1.5 ** attempt
-                logger.warning(f"Rate limited (429 HTTPError) for {full_symbol}, retrying in {delay:.1f}s...")
-                await asyncio.sleep(delay)
-                continue
-            logger.error(f"HTTPError fetching historical TV candle: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching historical TV candle: {e}")
-            return None
-            
+    # TV API response: { "s": "ok", "t": [...], "c": [...], "o": [...] }
+    target_key = "c" if price_type == 'close' else "o"
+    
+    if data and data.get("s") == "ok" and target_key in data and len(data[target_key]) > 0:
+        price = data[target_key][-1]
+        res_price = float(price)
+        _historical_price_cache[cache_key] = res_price
+        return res_price
+    
+    # Fallback to Hermes
+    logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Falling back to Hermes history API...")
+    clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
+    target_ts = to_ts if price_type == 'close' else from_ts
+    fallback_url = f"{HERMES_URL}/updates/price/{target_ts}"
+    fb_params = {"ids[]": clean_id, "parsed": "true"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            fb_resp = await client.get(fallback_url, params=fb_params, timeout=5.0)
+            if fb_resp.status_code == 200:
+                fb_data = fb_resp.json()
+                for item in fb_data.get("parsed", []):
+                    if clean_id in item.get("id", ""):
+                        price_info = item.get("price", {})
+                        p_str = price_info.get("price")
+                        e_str = price_info.get("expo")
+                        if p_str and e_str:
+                            res_price = float(p_str) * (10 ** int(e_str))
+                            _historical_price_cache[cache_key] = res_price
+                            return res_price
+            logger.error(f"Fallback to Hermes History failed for {full_symbol} at {target_ts} (Status: {fb_resp.status_code})")
+    except Exception as e:
+        logger.error(f"Error in Hermes fallback for {full_symbol}: {e}")
+        
     return None
 
 async def get_latest_price(pyth_id: str) -> float:

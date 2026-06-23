@@ -399,38 +399,13 @@ async def load_historical_data():
                 logger.warning(f"No Pyth mapping for {symbol}, skipping")
                 continue
 
-            url = f"{pyth_client.BENCHMARKS_URL}/shims/tradingview/history"
-            params = {
-                "symbol": full_symbol,
-                "resolution": "60",  # Hourly candles
-                "from": from_ts,
-                "to": to_ts,
-            }
-
-            # Retry up to 5 times with exponential backoff, using global semaphore
-            retries = 5
-            data = None
-            for attempt in range(retries):
-                try:
-                    async with httpx.AsyncClient() as client:
-                        async with pyth_client._tv_api_sem:
-                            resp = await client.get(url, params=params, timeout=15.0)
-                            await asyncio.sleep(0.5)  # Mandatory delay after each request
-                        if resp.status_code == 429:
-                            delay = 3.0 * (attempt + 1)
-                            logger.warning(f"Rate limited (429) loading history for {symbol}, retrying in {delay:.0f}s... (Attempt {attempt+1}/{retries})")
-                            await asyncio.sleep(delay)
-                            continue
-                        resp.raise_for_status()
-                        data = resp.json()
-                        break
-                except Exception as ex:
-                    if attempt < retries - 1:
-                        delay = 3.0 * (attempt + 1)
-                        logger.warning(f"Error loading history for {symbol} (Attempt {attempt+1}/{retries}): {ex}. Retrying in {delay:.0f}s...")
-                        await asyncio.sleep(delay)
-                    else:
-                        raise ex
+            data = await pyth_client.get_tv_history_raw(
+                full_symbol=full_symbol,
+                resolution="60",
+                from_ts=from_ts,
+                to_ts=to_ts,
+                max_retries=5
+            )
 
             if not data or data.get("s") != "ok" or "t" not in data:
                 logger.warning(f"No history for {symbol}: {data.get('s') if data else 'No Data'}")
