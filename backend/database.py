@@ -1,9 +1,12 @@
 import aiosqlite
 import logging
+import os
+import json
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-DB_FILE = "updown_tracker.db"
+DB_FILE = "/data/updown_tracker.db" if os.path.isdir("/data") else "updown_tracker.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
@@ -74,6 +77,15 @@ async def init_db():
                 ai_comment TEXT,
                 analysis_json TEXT,
                 created_at TEXT NOT NULL
+            )
+        """)
+
+        # Historical analysis cache table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS historical_cache (
+                symbol TEXT PRIMARY KEY,
+                analysis_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         """)
         
@@ -186,3 +198,26 @@ async def get_tracked_trades(limit: int = 50):
         async with db.execute("SELECT * FROM tracked_trades ORDER BY created_at DESC LIMIT ?", (limit,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+# --- Historical Reversal Analysis Cache ---
+
+async def save_historical_cache(symbol: str, analysis_data: list):
+    async with aiosqlite.connect(DB_FILE) as db:
+        now_str = datetime.now().isoformat()
+        await db.execute(
+            """INSERT OR REPLACE INTO historical_cache (symbol, analysis_json, updated_at)
+               VALUES (?, ?, ?)""",
+            (symbol, json.dumps(analysis_data), now_str)
+        )
+        await db.commit()
+
+async def get_historical_cache(symbol: str) -> tuple:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            "SELECT analysis_json, updated_at FROM historical_cache WHERE symbol = ?",
+            (symbol,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return json.loads(row[0]), row[1]
+            return None, None

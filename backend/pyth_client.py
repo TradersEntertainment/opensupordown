@@ -348,6 +348,16 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
                 await asyncio.sleep(0.5)
                 return data
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in [400, 404]:
+                logger.warning(f"TV History API returned {e.response.status_code} for {full_symbol} (invalid symbol). Skipping retries.")
+                break
+            if attempt < max_retries - 1:
+                delay = 2.0 * (attempt + 1)
+                logger.warning(f"HTTPStatusError {e.response.status_code} for {full_symbol} (Attempt {attempt+1}/{max_retries}). Retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"Failed to query TV History for {full_symbol} due to HTTPStatusError: {e}")
         except Exception as e:
             if attempt < max_retries - 1:
                 delay = 2.0 * (attempt + 1)

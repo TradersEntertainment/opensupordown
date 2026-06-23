@@ -25,6 +25,7 @@ from telegram import Bot
 
 import pyth_client
 import image_generator
+import database
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +389,20 @@ async def load_historical_data():
 
     for symbol in SCAN_WATCHLIST:
         try:
+            # Check SQLite database cache first
+            try:
+                cached_data, updated_at = await database.get_historical_cache(symbol)
+                if cached_data and updated_at:
+                    up_dt = datetime.fromisoformat(updated_at)
+                    # If the cache is less than 12 hours old, we can reuse it
+                    if (datetime.now() - up_dt).total_seconds() < 12 * 3600:
+                        _historical_cache[symbol] = cached_data
+                        loaded_count += 1
+                        logger.info(f"Loaded {symbol} history from DB cache (updated {updated_at})")
+                        continue
+            except Exception as cache_err:
+                logger.error(f"Error reading historical cache from DB for {symbol}: {cache_err}")
+
             full_symbol = pyth_client.SYMBOL_MAP.get(symbol.upper())
             if symbol.upper() == "WTI":
                 et_tz2 = pytz.timezone('US/Eastern')
@@ -486,7 +501,13 @@ async def load_historical_data():
             loaded_count += 1
             logger.info(f"  {symbol}: {len(analysis_data)} trading days")
 
-            await asyncio.sleep(2.0)  # Rate-limit friendly: must be slow for Pyth TV API
+            # Save successfully loaded data to SQLite database cache
+            try:
+                await database.save_historical_cache(symbol, analysis_data)
+            except Exception as cache_err:
+                logger.error(f"Error saving historical cache to DB for {symbol}: {cache_err}")
+
+            await asyncio.sleep(3.0)  # Rate-limit friendly: must be slow for Pyth TV API when hitting network
 
         except Exception as e:
             logger.error(f"Error loading history for {symbol}: {e}")
