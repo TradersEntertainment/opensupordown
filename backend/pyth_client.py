@@ -491,19 +491,13 @@ async def get_active_price(symbol: str, default_pyth_id: str) -> float:
                 logger.info(f"Commodity {symbol_up} market closed. Live Binance: ${binance_price:.2f}, Basis: ${basis:+.4f} -> Real Adjusted CME Price: ${adjusted_price:.2f}")
                 return adjusted_price
                 
-    # 2. Pre-market stock logic
-    total_minutes = now_et.hour * 60 + now_et.minute
-    is_premarket = 240 <= total_minutes < 570
-    
-    if is_premarket and not is_commodity:
-        regular_pyth_symbol = SYMBOL_MAP.get(symbol_up, f"Equity.US.{symbol_up}/USD")
-        if regular_pyth_symbol.startswith("Equity.US."):
-            pre_symbol = f"{regular_pyth_symbol}.PRE"
-            pre_id = pyth_id_cache.get(pre_symbol)
-            if pre_id:
-                price = await get_latest_price(pre_id)
-                if price:
-                    return price
+    # 2. Pre-market stock logic - DISABLED
+    # Pyth's .PRE feeds return stale prices from previous sessions (e.g. PLTR .PRE=$134 vs actual premarket=$119).
+    # Regular Pyth feeds already update during extended hours, so we use those instead.
+    # total_minutes = now_et.hour * 60 + now_et.minute
+    # is_premarket = 240 <= total_minutes < 570
+    # if is_premarket and not is_commodity:
+    #     ... .PRE feed logic disabled ...
                     
     # 3. Fetch default active price (official market open)
     official_price = await get_latest_price(default_pyth_id)
