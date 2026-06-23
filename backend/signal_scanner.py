@@ -389,6 +389,12 @@ async def load_historical_data():
     for symbol in SCAN_WATCHLIST:
         try:
             full_symbol = pyth_client.SYMBOL_MAP.get(symbol.upper())
+            if symbol.upper() == "WTI":
+                et_tz2 = pytz.timezone('US/Eastern')
+                full_symbol = pyth_client.get_wti_active_contract(datetime.now(et_tz2))
+            elif symbol.upper() == "NG":
+                et_tz2 = pytz.timezone('US/Eastern')
+                full_symbol = pyth_client.get_ng_active_contract(datetime.now(et_tz2))
             if not full_symbol:
                 logger.warning(f"No Pyth mapping for {symbol}, skipping")
                 continue
@@ -401,29 +407,35 @@ async def load_historical_data():
                 "to": to_ts,
             }
 
-            # Retry up to 3 times in case of rate limits/network errors
-            retries = 3
+            # Retry up to 5 times with exponential backoff, using global semaphore
+            retries = 5
             data = None
             for attempt in range(retries):
                 try:
                     async with httpx.AsyncClient() as client:
-                        resp = await client.get(url, params=params, timeout=15.0)
+                        async with pyth_client._tv_api_sem:
+                            resp = await client.get(url, params=params, timeout=15.0)
+                            await asyncio.sleep(0.5)  # Mandatory delay after each request
                         if resp.status_code == 429:
-                            logger.warning(f"Rate limited (429) loading history for {symbol}, retrying in 3.0s... (Attempt {attempt+1}/{retries})")
-                            await asyncio.sleep(3.0)
+                            delay = 3.0 * (attempt + 1)
+                            logger.warning(f"Rate limited (429) loading history for {symbol}, retrying in {delay:.0f}s... (Attempt {attempt+1}/{retries})")
+                            await asyncio.sleep(delay)
                             continue
                         resp.raise_for_status()
                         data = resp.json()
                         break
                 except Exception as ex:
                     if attempt < retries - 1:
-                        logger.warning(f"Error loading history for {symbol} (Attempt {attempt+1}/{retries}): {ex}. Retrying in 3.0s...")
-                        await asyncio.sleep(3.0)
+                        delay = 3.0 * (attempt + 1)
+                        logger.warning(f"Error loading history for {symbol} (Attempt {attempt+1}/{retries}): {ex}. Retrying in {delay:.0f}s...")
+                        await asyncio.sleep(delay)
                     else:
                         raise ex
 
             if not data or data.get("s") != "ok" or "t" not in data:
                 logger.warning(f"No history for {symbol}: {data.get('s') if data else 'No Data'}")
+                # Wait before next symbol even on failure
+                await asyncio.sleep(1.0)
                 continue
 
             timestamps = data["t"]
@@ -499,7 +511,7 @@ async def load_historical_data():
             loaded_count += 1
             logger.info(f"  {symbol}: {len(analysis_data)} trading days")
 
-            await asyncio.sleep(1.2)  # Rate-limit friendly
+            await asyncio.sleep(2.0)  # Rate-limit friendly: must be slow for Pyth TV API
 
         except Exception as e:
             logger.error(f"Error loading history for {symbol}: {e}")
