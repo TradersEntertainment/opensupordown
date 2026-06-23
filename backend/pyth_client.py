@@ -305,11 +305,85 @@ import time
 _tv_api_sem = asyncio.Semaphore(1)
 _tv_api_backoff_until = 0.0
 
+async def get_yahoo_history_raw(symbol: str, interval: str = "1h", range_str: str = "90d") -> dict:
+    """
+    Queries Yahoo Finance's chart API for historical data and maps it to Pyth TV History format.
+    """
+    symbol_up = symbol.upper()
+    yahoo_symbol = symbol_up
+    if symbol_up == "HSI":
+        yahoo_symbol = "EWH"
+    elif symbol_up == "RUT":
+        yahoo_symbol = "IWM"
+    elif symbol_up == "DAX":
+        yahoo_symbol = "EWG"
+        
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval={interval}&range={range_str}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=10.0)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                if "chart" in res_data and "result" in res_data["chart"] and res_data["chart"]["result"]:
+                    result = res_data["chart"]["result"][0]
+                    timestamps = result.get("timestamp", [])
+                    quote = result.get("indicators", {}).get("quote", [{}])[0]
+                    
+                    opens = quote.get("open", [])
+                    highs = quote.get("high", [])
+                    lows = quote.get("low", [])
+                    closes = quote.get("close", [])
+                    
+                    valid_t = []
+                    valid_o = []
+                    valid_h = []
+                    valid_l = []
+                    valid_c = []
+                    
+                    for i in range(len(timestamps)):
+                        if (i < len(opens) and opens[i] is not None and 
+                            i < len(highs) and highs[i] is not None and 
+                            i < len(lows) and lows[i] is not None and 
+                            i < len(closes) and closes[i] is not None):
+                            valid_t.append(timestamps[i])
+                            valid_o.append(float(opens[i]))
+                            valid_h.append(float(highs[i]))
+                            valid_l.append(float(lows[i]))
+                            valid_c.append(float(closes[i]))
+                            
+                    return {
+                        "s": "ok",
+                        "t": valid_t,
+                        "o": valid_o,
+                        "h": valid_h,
+                        "l": valid_l,
+                        "c": valid_c
+                    }
+    except Exception as e:
+        logger.warning(f"Failed to fetch Yahoo history for {symbol_up}: {e}")
+    return None
+
 async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to_ts: int, max_retries: int = 5) -> dict:
     """
     Low-level helper to query Pyth's TV History API.
     Handles concurrency via semaphore, global rate limit backoff, and retries.
+    Routes Stock/ETF symbols to Yahoo Finance to prevent rate limit issues and support EWY.
     """
+    if full_symbol.startswith("Equity."):
+        parts = full_symbol.split(".")
+        if len(parts) >= 3:
+            ticker = parts[2].split("/")[0]
+            interval = "1h" if resolution == "60" else "1d"
+            range_str = "90d" if interval == "1h" else "30d"
+            
+            logger.info(f"Routing history query for {full_symbol} to Yahoo Finance (ticker: {ticker})")
+            yahoo_data = await get_yahoo_history_raw(ticker, interval, range_str)
+            if yahoo_data:
+                return yahoo_data
+            logger.warning(f"Yahoo Finance history failed for {ticker}, falling back to Pyth TV History...")
+
     global _tv_api_backoff_until
     url = f"{BENCHMARKS_URL}/shims/tradingview/history"
     params = {
