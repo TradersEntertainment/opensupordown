@@ -124,6 +124,59 @@ def get_wti_active_contract(dt: datetime) -> str:
     
     return f"Commodities.WTI{cme_code}{year_digit}/USD"
 
+def get_ng_active_contract(dt: datetime) -> str:
+    """
+    Returns the active CME Natural Gas (NG/NGD) futures contract symbol.
+    NG uses the same CME month codes and a similar rollover structure to WTI.
+    The LTD for NG is 3 business days prior to the first day of the delivery month.
+    We approximate by using a rollover 4 business days before the 1st of the delivery month.
+    """
+    et_tz = pytz.timezone('US/Eastern')
+    if dt.tzinfo is None:
+        dt = et_tz.localize(dt)
+    else:
+        dt = dt.astimezone(et_tz)
+        
+    # Generate candidate delivery months
+    candidates = []
+    for offset in range(-1, 4):
+        y = dt.year
+        m = dt.month + offset
+        while m <= 0:
+            m += 12
+            y -= 1
+        while m > 12:
+            m -= 12
+            y += 1
+        
+        # Approximate rollover: 4 business days before 1st of delivery month
+        first_of_month = date(y, m, 1)
+        curr = first_of_month
+        days_found = 0
+        while days_found < 4:
+            curr -= timedelta(days=1)
+            if curr.weekday() < 5:  # Simple weekday check
+                days_found += 1
+        
+        rollover_dt = et_tz.localize(datetime(curr.year, curr.month, curr.day, 18, 0, 0))
+        candidates.append({"year": y, "month": m, "rollover": rollover_dt})
+    
+    candidates.sort(key=lambda x: x["rollover"])
+    
+    active_cand = None
+    for cand in candidates:
+        if cand["rollover"] > dt:
+            active_cand = cand
+            break
+    
+    if active_cand is None:
+        active_cand = candidates[-1]
+    
+    cme_code = CME_MONTH_CODES.get(active_cand["month"])
+    year_digit = str(active_cand["year"])[-1]
+    
+    return f"Commodities.NGD{cme_code}{year_digit}/USD"
+
 # Hardcoded symbol mapping for common assets to avoid needing a full cache initially
 # Users can add more via dashboard/telegram if needed
 SYMBOL_MAP = {
@@ -152,14 +205,12 @@ SYMBOL_MAP = {
     "SILVER": "Metal.XAG/USD",
     "XAG": "Metal.XAG/USD",
     "XAGUSD": "Metal.XAG/USD",
-    "NG": "Crypto.NG/USD",
-    "RUT": "Index.US.RUT/USD",
-    "HSI": "Index.HK.HSI/HKD",
-    "DIA": "Index.US.DJI/USD",
-    "DAX": "Index.EU.DAX/EUR",
-    "NKY": "Index.JP.NI225/JPY",
-    "UKX": "Index.GB.FTSE/GBP",
-    "NYA": "Index.US.NYA/USD",
+    # NG is resolved dynamically like WTI (futures contract)
+    # Indices mapped to their liquid ETF equivalents available on Pyth
+    "DIA": "Equity.US.DIA/USD",
+    "RUT": "Equity.US.IWM/USD",
+    "HSI": "Equity.US.EWH/USD",
+    "DAX": "Equity.US.EWG/USD",
     "BTC": "Crypto.BTC/USD"
 }
 
@@ -195,18 +246,23 @@ def get_pyth_id(symbol_name: str) -> str:
         now_et = datetime.now(et_tz)
         pyth_symbol = get_wti_active_contract(now_et)
         logger.info(f"Resolved dynamic WTI active contract: {pyth_symbol}")
+    elif symbol_name == "NG":
+        et_tz = pytz.timezone('US/Eastern')
+        now_et = datetime.now(et_tz)
+        pyth_symbol = get_ng_active_contract(now_et)
+        logger.info(f"Resolved dynamic NG active contract: {pyth_symbol}")
     else:
-        pyth_symbol = SYMBOL_MAP.get(symbol_name, symbol_name) # Fallback to input if not in map
+        pyth_symbol = SYMBOL_MAP.get(symbol_name)
+        if not pyth_symbol:
+            logger.warning(f"Symbol {symbol_name} not found in SYMBOL_MAP, skipping.")
+            return None, None
     
-    # Check cache
+    # Check exact match in pyth_id_cache (populated by init_feeds_cache)
     if pyth_symbol in pyth_id_cache:
         return pyth_id_cache[pyth_symbol], pyth_symbol
     
-    # If not in exact map, try fuzzy search in cache
-    for sym, pid in pyth_id_cache.items():
-        if symbol_name in sym.upper():
-            return pid, sym
-            
+    # No fuzzy matching - exact matches only to prevent NG->CPNG, HSI->HSIC, NVDA->NVDAX type bugs
+    logger.warning(f"Pyth ID not found in cache for resolved symbol {pyth_symbol} (from {symbol_name})")
     return None, None
 
 def get_previous_close_times(symbol: str) -> tuple[int, int]:
@@ -242,7 +298,8 @@ def get_previous_open_times(symbol: str) -> tuple[int, int]:
 import asyncio
 
 # Global semaphore to strictly limit concurrency to Pyth Benchmarks API to prevent 429s
-_tv_api_sem = asyncio.Semaphore(2)
+# Only 1 concurrent request allowed - Pyth TV API is very strict with rate limits
+_tv_api_sem = asyncio.Semaphore(1)
 
 async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
     """
@@ -265,17 +322,17 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
         "to": to_ts
     }
     
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient() as client:
                 async with _tv_api_sem:
                     resp = await client.get(url, params=params, timeout=10.0)
-                    # Small artificial delay to prevent burst limit
-                    await asyncio.sleep(0.2)
+                    # Mandatory delay between requests to prevent burst limit
+                    await asyncio.sleep(0.5)
                 
                 if resp.status_code == 429:
-                    delay = 1.5 ** attempt
+                    delay = 2.0 * (attempt + 1)
                     logger.warning(f"Rate limited (429) on TV History for {full_symbol}, retrying in {delay:.1f}s...")
                     await asyncio.sleep(delay)
                     continue

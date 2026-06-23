@@ -42,12 +42,12 @@ SCAN_START_MINUTES = 900   # 15:00 ET
 SCAN_END_MINUTES = 1020     # 17:00 ET (24:00 TR) to cover commodities close
 SCAN_INTERVAL = 60         # Every 60 seconds
 
-# Stocks, commodities and indices to scan (complete 27-asset watchlist representing all Up/Down markets)
+# Stocks, commodities and indices to scan
+# NKY, UKX, NYA, DAX removed - Pyth has no price feeds for these indices/ETFs
 SCAN_WATCHLIST = [
     "SPY", "PLTR", "TSLA", "NVDA", "AAPL", "AMZN", "META", "GOOGL",
     "MSFT", "NFLX", "COIN", "HOOD", "ABNB", "RKLB", "EWY", "OPEN",
-    "MU", "WTI", "XAU", "XAG", "HSI", "NG", "NKY", "UKX", "DIA", "DAX", 
-    "RUT", "NYA"
+    "MU", "WTI", "XAU", "XAG", "HSI", "NG", "DIA", "RUT"
 ]
 
 ASSET_FUZZY_MAP = {
@@ -1468,8 +1468,8 @@ async def run_manual_scan() -> list:
             logger.error(f"Error scanning single symbol {symbol} manually: {e}")
             return None
 
-    # Run in parallel using asyncio.gather with a semaphore to prevent API rate limiting (429s) while maximizing speed
-    sem = asyncio.Semaphore(4)
+    # Run with limited parallelism - Pyth TV API is very strict, 2 concurrent symbols max
+    sem = asyncio.Semaphore(2)
     
     async def sem_scan(sym):
         async with sem:
