@@ -1,0 +1,45 @@
+ANALYSIS RESULTS:
+{'total_similar_days': 16, 'reversed_count': 1, 'reversal_rate': 6.25, 'worst_case': -6.228155291625921, 'confidence_stars': '⭐⭐⭐⭐', 'confidence_label': 'GÜVENLİ', 'is_safe_bet': True, 'at_level': {'total': 16, 'reversed': 1}, 'similar': {'total': 24, 'reversed': 1}}
+
+MATCHED DAYS DETAILS:
+1. Date: 2026-03-02, Snap Price: $140.60, Snap Diff: 2.44%, Final Close: $145.17, Final Diff: 5.78%, Reversed: False
+2. Date: 2026-03-02, Snap Price: $144.63, Snap Diff: 5.38%, Final Close: $145.17, Final Diff: 5.78%, Reversed: False
+3. Date: 2026-03-04, Snap Price: $148.11, Snap Diff: 0.57%, Final Close: $153.17, Final Diff: 4.00%, Reversed: False
+4. Date: 2026-03-04, Snap Price: $154.30, Snap Diff: 4.77%, Final Close: $153.17, Final Diff: 4.00%, Reversed: False
+5. Date: 2026-03-06, Snap Price: $154.94, Snap Diff: 1.49%, Final Close: $157.15, Final Diff: 2.93%, Reversed: False
+6. Date: 2026-03-11, Snap Price: $152.20, Snap Diff: 0.68%, Final Close: $151.47, Final Diff: 0.20%, Reversed: False
+7. Date: 2026-03-12, Snap Price: $152.89, Snap Diff: 0.94%, Final Close: $153.47, Final Diff: 1.32%, Reversed: False
+8. Date: 2026-03-12, Snap Price: $153.67, Snap Diff: 1.45%, Final Close: $153.47, Final Diff: 1.32%, Reversed: False
+9. Date: 2026-03-16, Snap Price: $152.27, Snap Diff: 0.87%, Final Close: $152.74, Final Diff: 1.18%, Reversed: False
+10. Date: 2026-03-16, Snap Price: $152.38, Snap Diff: 0.94%, Final Close: $152.74, Final Diff: 1.18%, Reversed: False
+11. Date: 2026-03-17, Snap Price: $155.02, Snap Diff: 1.49%, Final Close: $155.10, Final Diff: 1.54%, Reversed: False
+12. Date: 2026-03-23, Snap Price: $153.21, Snap Diff: 1.69%, Final Close: $160.90, Final Diff: 6.80%, Reversed: False
+13. Date: 2026-03-23, Snap Price: $159.30, Snap Diff: 5.74%, Final Close: $160.90, Final Diff: 6.80%, Reversed: False
+14. Date: 2026-03-25, Snap Price: $157.38, Snap Diff: 1.72%, Final Close: $154.94, Final Diff: 0.13%, Reversed: False
+15. Date: 2026-03-25, Snap Price: $158.95, Snap Diff: 2.73%, Final Close: $154.94, Final Diff: 0.13%, Reversed: False
+16. Date: 2026-03-31, Snap Price: $139.90, Snap Diff: 1.74%, Final Close: $146.28, Final Diff: 6.38%, Reversed: False
+17. Date: 2026-03-31, Snap Price: $142.58, Snap Diff: 3.68%, Final Close: $146.28, Final Diff: 6.38%, Reversed: False
+18. Date: 2026-04-08, Snap Price: $154.72, Snap Diff: 3.06%, Final Close: $140.78, Final Diff: -6.23%, Reversed: True
+19. Date: 2026-04-13, Snap Price: $130.12, Snap Diff: 1.64%, Final Close: $132.39, Final Diff: 3.40%, Reversed: False
+20. Date: 2026-04-13, Snap Price: $132.52, Snap Diff: 3.51%, Final Close: $132.39, Final Diff: 3.40%, Reversed: False
+21. Date: 2026-04-14, Snap Price: $134.44, Snap Diff: 1.55%, Final Close: $135.67, Final Diff: 2.48%, Reversed: False
+22. Date: 2026-04-14, Snap Price: $137.77, Snap Diff: 4.07%, Final Close: $135.67, Final Diff: 2.48%, Reversed: False
+23. Date: 2026-04-15, Snap Price: $136.50, Snap Diff: 0.62%, Final Close: $142.16, Final Diff: 4.79%, Reversed: False
+24. Date: 2026-04-15, Snap Price: $137.77, Snap Diff: 1.55%, Final Close: $142.16, Final Diff: 4.79%, Reversed: False
+25. Date: 2026-04-16, Snap Price: $144.22, Snap Diff: 1.45%, Final Close: $142.80, Final Diff: 0.44%, Reversed: False
+26. Date: 2026-04-17, Snap Price: $144.79, Snap Diff: 1.40%, Final Close: $146.35, Final Diff: 2.49%, Reversed: False
+27. Date: 2026-04-17, Snap Price: $147.18, Snap Diff: 3.07%, Final Close: $146.35, Final Diff: 2.49%, Reversed: False
+28. Date: 2026-04-21, Snap Price: $146.85, Snap Diff: 0.63%, Final Close: $145.97, Final Diff: 0.03%, Reversed: False
+29. Date: 2026-04-21, Snap Price: $148.80, Snap Diff: 1.97%, Final Close: $145.97, Final Diff: 0.03%, Reversed: False
+30. Date: 2026-04-22, Snap Price: $148.20, Snap Diff: 1.53%, Final Close: $152.62, Final Diff: 4.56%, Reversed: False
+31. Date: 2026-04-22, Snap Price: $152.22, Snap Diff: 4.28%, Final Close: $152.62, Final Diff: 4.56%, Reversed: False
+32. Date: 2026-04-24, Snap Price: $142.84, Snap Diff: 0.86%, Final Close: $143.07, Final Diff: 1.02%, Reversed: False
+33. Date: 2026-04-27, Snap Price: $144.68, Snap Diff: 1.13%, Final Close: $143.08, Final Diff: 0.01%, Reversed: False
+34. Date: 2026-05-01, Snap Price: $143.24, Snap Diff: 2.98%, Final Close: $144.06, Final Diff: 3.58%, Reversed: False
+35. Date: 2026-05-01, Snap Price: $142.83, Snap Diff: 2.69%, Final Close: $144.06, Final Diff: 3.58%, Reversed: False
+36. Date: 2026-05-04, Snap Price: $147.74, Snap Diff: 2.55%, Final Close: $146.01, Final Diff: 1.35%, Reversed: False
+37. Date: 2026-05-04, Snap Price: $147.40, Snap Diff: 2.32%, Final Close: $146.01, Final Diff: 1.35%, Reversed: False
+38. Date: 2026-05-07, Snap Price: $135.07, Snap Diff: 0.99%, Final Close: $137.10, Final Diff: 2.51%, Reversed: False
+39. Date: 2026-05-07, Snap Price: $138.19, Snap Diff: 3.33%, Final Close: $137.10, Final Diff: 2.51%, Reversed: False
+40. Date: 2026-05-14, Snap Price: $131.79, Snap Diff: 1.30%, Final Close: $133.76, Final Diff: 2.82%, Reversed: False
+41. Date: 2026-05-18, Snap Price: $134.78, Snap Diff: 0.57%, Final Close: $135.13, Final Diff: 0.84%, Reversed: False

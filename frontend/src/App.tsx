@@ -123,13 +123,13 @@ const TRANSLATIONS = {
     settingsDesc: "Örnek: Tehlike Bölgesi %1, Adım %0.1 ise; Fiyat sınıra %1 yaklaştığında uyarır. Sonra %0.9, %0.8, %0.7 diye yaklaştıkça yeni mesaj atar.",
     scannerDesc: "16 watchlist hissesini ve Polymarket tahtalarını geçmiş 60 günlük verilerle analiz eder.",
     lastScan: "Son Tarama",
-    scanNowButton: "🔍 Şimdi Tara",
-    scanningButton: "Taranıyor...",
+    scanNowButton: "📋 Emir Defterini Güncelle",
+    scanningButton: "Güncelleniyor...",
     offHoursWarning: "Piyasa saatleri dışındasınız:",
     hepsi: "Hepsi",
     safeBets: "💎 İmkansız / Güvenli Bahisler",
     ordersAt99: "📦 99¢ Emir Olanlar",
-    noOpportunity: "Taramayı başlatmak için yukarıdaki 'Şimdi Tara' butonuna basın.",
+    noOpportunity: "Veriler yükleniyor, lütfen bekleyin...",
     noOpportunityFiltered: "Bu filtreye uygun bir fırsat bulunamadı.",
     changeYesterday: "Düne Göre Değişim",
     marketBoard: "Polymarket Tahtası",
@@ -152,7 +152,7 @@ const TRANSLATIONS = {
     deleteSuccess: "Pozisyon silindi.",
     errorOccurred: "Hata oluştu.",
     serverError: "Sunucuya bağlanılamadı.",
-    scanError: "Tarama sırasında bir hata oluştu.",
+    scanError: "Güncelleme sırasında bir hata oluştu.",
     loading: "Yükleniyor...",
     cmeRollAlert: "ROLLOVER ALFA UYARISI",
     noTrades: "Henüz analiz edilmiş bir işlem bulunamadı.",
@@ -202,13 +202,13 @@ const TRANSLATIONS = {
     settingsDesc: "Example: Danger Zone 1%, Step 0.1%; Alerts at 1% distance, then at 0.9%, 0.8%, 0.7% as price approaches reference line.",
     scannerDesc: "Analyzes 16 watchlist assets and Polymarket orderbooks using past 60 days of historical data.",
     lastScan: "Last Scan",
-    scanNowButton: "🔍 Scan Now",
-    scanningButton: "Scanning...",
+    scanNowButton: "📋 Refresh Orderbook",
+    scanningButton: "Refreshing...",
     offHoursWarning: "You are outside regular trading hours:",
     hepsi: "All",
     safeBets: "💎 Safe / Impossible Bets",
     ordersAt99: "📦 99¢ Orders",
-    noOpportunity: "Press the 'Scan Now' button above to start scanning.",
+    noOpportunity: "Loading data, please wait...",
     noOpportunityFiltered: "No opportunities found matching this filter.",
     changeYesterday: "Change vs Yesterday",
     marketBoard: "Polymarket Board",
@@ -231,7 +231,7 @@ const TRANSLATIONS = {
     deleteSuccess: "Position deleted.",
     errorOccurred: "An error occurred.",
     serverError: "Could not connect to server.",
-    scanError: "An error occurred during scanning.",
+    scanError: "An error occurred during refresh.",
     loading: "Loading...",
     cmeRollAlert: "ROLLOVER ALPHA ALERT",
     noTrades: "No analyzed trades found yet.",
@@ -372,13 +372,32 @@ function App() {
     }
   };
 
+  const fetchScanResults = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/scan-results`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.results && data.results.length > 0) {
+          setScanResults(data.results);
+          if (data.scan_time) {
+            setScanTime(new Date(data.scan_time).toLocaleTimeString(lang === 'tr' ? 'tr-TR' : 'en-US'));
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch scan results:", err);
+    }
+  };
+
   const handleScanNow = async () => {
     setScanning(true);
     try {
-      const res = await fetch(`${API_BASE}/scan-now`);
+      const res = await fetch(`${API_BASE}/refresh-orderbook`);
       if (res.ok) {
         const data = await res.json();
-        setScanResults(data);
+        if (data.results) {
+          setScanResults(data.results);
+        }
         setScanTime(new Date().toLocaleTimeString(lang === 'tr' ? 'tr-TR' : 'en-US'));
       } else {
         alert(t.scanError);
@@ -390,6 +409,18 @@ function App() {
       setScanning(false);
     }
   };
+
+  // Auto-load scan results when scanner tab is active, and poll every 30 seconds
+  useEffect(() => {
+    if (activeTab !== 'scanner') return;
+
+    // Fetch immediately on tab activation
+    fetchScanResults();
+
+    // Poll every 30 seconds
+    const interval = setInterval(fetchScanResults, 30000);
+    return () => clearInterval(interval);
+  }, [activeTab, lang]);
 
   const filteredScanResults = scanResults.filter(r => {
     if (scannerFilter === 'safe') return r.is_safe_bet || r.is_impossible;
@@ -462,9 +493,6 @@ function App() {
           <button
             onClick={() => {
               setActiveTab('scanner');
-              if (scanResults.length === 0) {
-                handleScanNow();
-              }
             }}
             className={`px-6 py-3 font-semibold transition-all border-b-2 flex items-center gap-2 ${
               activeTab === 'scanner'

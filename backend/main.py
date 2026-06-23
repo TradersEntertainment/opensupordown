@@ -161,11 +161,18 @@ async def get_trades():
     return await database.get_tracked_trades()
 
 
-@app.get("/api/scan-now")
-async def run_scan_now():
+@app.get("/api/scan-results")
+async def get_scan_results():
+    """Return the latest cached background scan results immediately (no computation)."""
+    return signal_scanner.get_cached_results()
+
+
+@app.get("/api/refresh-orderbook")
+async def refresh_orderbook():
+    """Refresh only the Polymarket orderbook data for the existing cached scan results."""
     try:
-        results = await signal_scanner.run_manual_scan()
-        return results
+        results = await signal_scanner.refresh_orderbook_only()
+        return {"results": results, "scan_time": signal_scanner._last_scan_time}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

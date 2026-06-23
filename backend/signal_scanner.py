@@ -140,10 +140,14 @@ _cache_loaded = False
 _cache_load_date = None      # Refresh cache once per day
 
 _signals_sent_today = {}     # (symbol, direction) -> {diff_pct, time, was_safe}
-_last_scan_time = 0
+_last_signal_scan_time = 0   # Used by the Telegram signal scanner loop interval
 
 _poly_cache = {}             # symbol -> {up_price, down_price, up_token_id, ...}
 _last_poly_time = 0
+
+# Background scan cache for the dashboard/frontend
+_cached_scan_results = []    # Latest scan results for /api/scan-results
+_last_scan_time = None       # Timestamp of last background scan completion
 
 # Signal bot (same token, different chat_id)
 _signal_bot = None
@@ -923,7 +927,7 @@ async def scan_for_signals():
 
 async def signal_scanner_loop():
     """Background loop for the signal scanner."""
-    global _signals_sent_today, _last_scan_time, _cache_load_date
+    global _signals_sent_today, _last_signal_scan_time, _cache_load_date
 
     logger.info("Signal Scanner starting...")
 
@@ -968,11 +972,11 @@ async def signal_scanner_loop():
 
             # Scan interval
             now_ts = time_mod.time()
-            if now_ts - _last_scan_time < SCAN_INTERVAL:
+            if now_ts - _last_signal_scan_time < SCAN_INTERVAL:
                 await asyncio.sleep(5)
                 continue
 
-            _last_scan_time = now_ts
+            _last_signal_scan_time = now_ts
             logger.info(f"Signal scan running... ({now_et.strftime('%H:%M')} ET, {minutes_to_close(total_minutes)}dk kala)")
             await scan_for_signals()
 
@@ -991,9 +995,305 @@ def start_signal_scanner():
     """Start the signal scanner background task."""
     asyncio.create_task(signal_scanner_loop())
     asyncio.create_task(hourly_scanner_loop())
+    asyncio.create_task(background_scan_loop())
 
 
 _last_hourly_scan_hour = -1
+
+
+# ─── Background Dashboard Scan Loop ───────────────────────────────────────
+
+def get_cached_results() -> dict:
+    """Return the latest cached scan results for the /api/scan-results endpoint."""
+    return {
+        "results": _cached_scan_results,
+        "scan_time": _last_scan_time,
+    }
+
+
+async def background_scan_loop():
+    """
+    Background loop that continuously scans all watchlist symbols sequentially,
+    caching results in _cached_scan_results for the frontend to poll via /api/scan-results.
+    Runs every 60s during market hours, every 120s otherwise.
+    Scans symbols ONE BY ONE with small delays to avoid Pyth API 429 rate limits.
+    """
+    global _cached_scan_results, _last_scan_time, _historical_cache, _cache_loaded
+
+    logger.info("Background scan loop starting... waiting for historical data to load.")
+
+    # Wait for initial history load
+    while not _cache_loaded:
+        await asyncio.sleep(5)
+
+    logger.info("Background scan loop active. Will scan sequentially to avoid rate limits.")
+
+    while True:
+        try:
+            et_tz = pytz.timezone("US/Eastern")
+            now_et = datetime.now(et_tz)
+            total_minutes = now_et.hour * 60 + now_et.minute
+
+            # Determine if we're in market hours (9:30 AM - 5:00 PM ET on weekdays)
+            is_market_hours = (
+                now_et.weekday() < 5
+                and 570 <= total_minutes < 1020
+            )
+            scan_interval = 60 if is_market_hours else 120
+
+            logger.info(f"Background scan starting... ({'market hours' if is_market_hours else 'off hours'}, interval={scan_interval}s)")
+
+            # Determine time context (same logic as run_manual_scan)
+            is_off_hours = False
+            off_hours_reason = ""
+
+            if now_et.weekday() >= 5:
+                minutes_to_close_val = 60
+                is_off_hours = True
+                off_hours_reason = "Hafta sonu nedeniyle ABD piyasaları kapalıdır. Test edebilmeniz amacıyla analiz kapanışa 1 saat (60 dk) kala şeklinde simüle edilmiştir."
+            elif total_minutes < 570:
+                minutes_to_close_val = 360
+                is_off_hours = True
+                off_hours_reason = "ABD piyasaları henüz açılmamıştır (Pre-market). Risk analizi tüm işlem gününü kapsayacak şekilde açılış mumu (360 dk kala) referans alınarak yapılmıştır."
+            elif total_minutes >= 960:
+                minutes_to_close_val = 60
+                is_off_hours = True
+                off_hours_reason = "ABD piyasaları kapanmıştır. Test edebilmeniz amacıyla analiz kapanışa 1 saat (60 dk) kala şeklinde simüle edilmiştir."
+            else:
+                minutes_to_close_val = max(0, 960 - total_minutes)
+                is_off_hours = False
+                off_hours_reason = ""
+
+            # Fetch Polymarket active events
+            poly_data = await fetch_polymarket_events()
+
+            scan_results = []
+
+            # Scan symbols SEQUENTIALLY (one by one) to avoid 429 rate limits
+            for symbol in SCAN_WATCHLIST:
+                try:
+                    pyth_id, full_symbol = pyth_client.get_pyth_id(symbol)
+                    if not pyth_id:
+                        continue
+
+                    current_price = await pyth_client.get_active_price(symbol, pyth_id)
+                    if not current_price:
+                        await asyncio.sleep(0.5)
+                        continue
+
+                    from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+                    ref_price = await pyth_client.get_historical_candle_price(
+                        full_symbol, pyth_id, from_ts, to_ts, price_type="close"
+                    )
+                    if not ref_price or ref_price == 0:
+                        await asyncio.sleep(0.5)
+                        continue
+
+                    diff_pct = ((current_price - ref_price) / ref_price) * 100
+                    direction = "UP" if diff_pct > 0 else "DOWN"
+
+                    # Calculate actual minutes to close for this specific symbol
+                    is_commodity = any(c in symbol.upper() for c in ["WTI", "XAU", "XAG", "GOLD", "SILVER"])
+                    close_mins = 1020 if is_commodity else 960
+                    real_minutes_to_close = max(0, close_mins - total_minutes)
+
+                    if is_off_hours:
+                        if total_minutes < 570 and now_et.weekday() < 5:
+                            symbol_minutes_to_close = real_minutes_to_close
+                            analysis_minutes = min(360 if not is_commodity else 420, real_minutes_to_close)
+                        else:
+                            symbol_minutes_to_close = minutes_to_close_val
+                            analysis_minutes = minutes_to_close_val
+                    else:
+                        symbol_minutes_to_close = real_minutes_to_close
+                        analysis_minutes = real_minutes_to_close
+
+                    # Reversal analysis
+                    analysis = analyze_reversal_risk(symbol, diff_pct, analysis_minutes)
+
+                    # Polymarket details
+                    up_price = 0.0
+                    down_price = 0.0
+                    safe_price = 0.0
+                    poly_slug = ""
+                    best_cheap_price = None
+                    total_cheap_size = 0.0
+                    depth_at_99 = 0.0
+                    has_orders_at_99 = False
+
+                    book = None
+                    poly_info = poly_data.get(symbol)
+                    if poly_info:
+                        up_price = poly_info.get("up_price", 0.0)
+                        down_price = poly_info.get("down_price", 0.0)
+                        poly_slug = poly_info.get("slug", "")
+                        safe_price = up_price if direction == "UP" else down_price
+                        safe_token = (
+                            poly_info.get("up_token_id")
+                            if direction == "UP"
+                            else poly_info.get("down_token_id")
+                        )
+
+                        if safe_token:
+                            book = await fetch_orderbook_depth(safe_token)
+
+                            cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+                            if cheap_asks:
+                                best_cheap_price = min(cheap_asks.keys())
+                                total_cheap_size = sum(cheap_asks.values())
+
+                            depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+                            has_orders_at_99 = depth_at_99 > 0 or (best_cheap_price is not None and best_cheap_price <= 0.99 and total_cheap_size > 0)
+
+                    is_impossible = analysis.get("reversed_count", 99) <= 1 and analysis.get("total_similar_days", 0) >= 2
+                    is_safe_bet = analysis.get("is_safe_bet", False)
+
+                    scan_results.append({
+                        "symbol": symbol,
+                        "direction": direction,
+                        "current_price": current_price,
+                        "ref_price": ref_price,
+                        "diff_pct": diff_pct,
+                        "minutes_to_close": symbol_minutes_to_close,
+                        "is_off_hours": is_off_hours,
+                        "off_hours_reason": off_hours_reason,
+                        "historical": {
+                            "total_similar_days": analysis.get("total_similar_days", 0),
+                            "reversed_count": analysis.get("reversed_count", 0),
+                            "reversal_rate": analysis.get("reversal_rate", 100.0),
+                            "worst_case": analysis.get("worst_case", 0.0),
+                            "confidence_stars": analysis.get("confidence_stars", "❓"),
+                            "confidence_label": analysis.get("confidence_label", "VERİ YOK"),
+                        },
+                        "poly": {
+                            "slug": poly_slug,
+                            "up_price": up_price,
+                            "down_price": down_price,
+                            "safe_outcome_price": safe_price,
+                            "best_ask": best_cheap_price,
+                            "depth_at_best": total_cheap_size if best_cheap_price else 0.0,
+                            "depth_at_99": depth_at_99,
+                            "has_orders_at_99": has_orders_at_99
+                        },
+                        "is_safe_bet": is_safe_bet,
+                        "is_impossible": is_impossible,
+                        "has_orders_at_99": has_orders_at_99
+                    })
+
+                except Exception as e:
+                    logger.error(f"Background scan error for {symbol}: {e}")
+
+                # Small delay between each symbol to avoid 429 rate limits
+                await asyncio.sleep(0.5)
+
+            # Sort results: safe bets with orders at top, then by diff_pct
+            def sort_key(item):
+                is_safe = item["is_safe_bet"]
+                is_imp = item["is_impossible"]
+                has_99 = item["poly"]["has_orders_at_99"]
+                abs_diff = abs(item["diff_pct"])
+
+                score = 0
+                if is_safe or is_imp:
+                    score += 1000
+                if has_99:
+                    score += 500
+
+                return (score, abs_diff)
+
+            scan_results.sort(key=sort_key, reverse=True)
+
+            # Update the global cache
+            _cached_scan_results = scan_results
+            _last_scan_time = datetime.now(et_tz).isoformat()
+
+            logger.info(f"Background scan complete: {len(scan_results)} symbols cached.")
+
+        except Exception as e:
+            logger.error(f"Error in background scan loop: {e}")
+
+        await asyncio.sleep(scan_interval)
+
+
+async def refresh_orderbook_only() -> list:
+    """
+    Refresh only the Polymarket orderbook data for the existing cached scan results.
+    This is fast since it only hits the Polymarket API (not Pyth).
+    Re-fetches poly events and orderbook depth for each cached result's token IDs.
+    """
+    global _cached_scan_results, _last_scan_time
+
+    if not _cached_scan_results:
+        return []
+
+    # Re-fetch Polymarket active events (force refresh by resetting cache timer)
+    global _last_poly_time
+    _last_poly_time = 0
+    poly_data = await fetch_polymarket_events()
+
+    updated_results = []
+
+    for result in _cached_scan_results:
+        try:
+            symbol = result["symbol"]
+            direction = result["direction"]
+
+            # Start with the existing result (keeps price/historical data intact)
+            updated = dict(result)
+
+            poly_info = poly_data.get(symbol)
+            if poly_info:
+                up_price = poly_info.get("up_price", 0.0)
+                down_price = poly_info.get("down_price", 0.0)
+                poly_slug = poly_info.get("slug", "")
+                safe_price = up_price if direction == "UP" else down_price
+                safe_token = (
+                    poly_info.get("up_token_id")
+                    if direction == "UP"
+                    else poly_info.get("down_token_id")
+                )
+
+                best_cheap_price = None
+                total_cheap_size = 0.0
+                depth_at_99 = 0.0
+                has_orders_at_99 = False
+
+                if safe_token:
+                    book = await fetch_orderbook_depth(safe_token)
+
+                    cheap_asks = {p: s for p, s in book.get("asks", {}).items() if 0.90 <= p <= 0.99}
+                    if cheap_asks:
+                        best_cheap_price = min(cheap_asks.keys())
+                        total_cheap_size = sum(cheap_asks.values())
+
+                    depth_at_99 = book.get("asks", {}).get(0.99, 0.0)
+                    has_orders_at_99 = depth_at_99 > 0 or (best_cheap_price is not None and best_cheap_price <= 0.99 and total_cheap_size > 0)
+
+                updated["poly"] = {
+                    "slug": poly_slug,
+                    "up_price": up_price,
+                    "down_price": down_price,
+                    "safe_outcome_price": safe_price,
+                    "best_ask": best_cheap_price,
+                    "depth_at_best": total_cheap_size if best_cheap_price else 0.0,
+                    "depth_at_99": depth_at_99,
+                    "has_orders_at_99": has_orders_at_99
+                }
+                updated["has_orders_at_99"] = has_orders_at_99
+
+            updated_results.append(updated)
+
+        except Exception as e:
+            logger.error(f"Error refreshing orderbook for {result.get('symbol')}: {e}")
+            updated_results.append(result)  # Keep the old data on error
+
+    # Update the global cache with refreshed poly data
+    _cached_scan_results = updated_results
+    et_tz = pytz.timezone("US/Eastern")
+    _last_scan_time = datetime.now(et_tz).isoformat()
+
+    logger.info(f"Orderbook refresh complete for {len(updated_results)} symbols.")
+    return updated_results
 
 
 async def hourly_scanner_loop():
