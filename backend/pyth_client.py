@@ -369,21 +369,28 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
     """
     Low-level helper to query Pyth's TV History API.
     Handles concurrency via semaphore, global rate limit backoff, and retries.
-    Routes Stock/ETF symbols to Yahoo Finance to prevent rate limit issues and support EWY.
+    For daily resolution (resolution == "D"), we query Pyth TV History API first to match
+    Polymarket's resolution source, and only fallback to Yahoo Finance if Pyth fails or returns 400/404 or s != "ok".
+    For other resolutions (e.g. resolution == "60"), we route Stock/ETF symbols directly to Yahoo Finance to avoid rate limits.
     """
-    if full_symbol.startswith("Equity."):
+    is_equity = full_symbol.startswith("Equity.")
+    ticker = None
+    if is_equity:
         parts = full_symbol.split(".")
         if len(parts) >= 3:
             ticker = parts[2].split("/")[0]
-            interval = "1h" if resolution == "60" else "1d"
-            range_str = "90d" if interval == "1h" else "30d"
-            
-            logger.info(f"Routing history query for {full_symbol} to Yahoo Finance (ticker: {ticker})")
-            yahoo_data = await get_yahoo_history_raw(ticker, interval, range_str)
-            if yahoo_data:
-                return yahoo_data
-            logger.warning(f"Yahoo Finance history failed for {ticker}, falling back to Pyth TV History...")
 
+    # Route stocks/ETFs directly to Yahoo if not requesting daily resolution
+    if is_equity and ticker and resolution != "D":
+        interval = "1h" if resolution == "60" else "1d"
+        range_str = "90d" if interval == "1h" else "30d"
+        logger.info(f"Routing hourly/intraday history query for {full_symbol} to Yahoo Finance (ticker: {ticker})")
+        yahoo_data = await get_yahoo_history_raw(ticker, interval, range_str)
+        if yahoo_data:
+            return yahoo_data
+        logger.warning(f"Yahoo Finance history failed for {ticker}, falling back to Pyth TV History...")
+
+    # Query Pyth TV History API
     global _tv_api_backoff_until
     url = f"{BENCHMARKS_URL}/shims/tradingview/history"
     params = {
@@ -393,6 +400,7 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
         "to": to_ts
     }
     
+    pyth_data = None
     for attempt in range(max_retries):
         try:
             async with _tv_api_sem:
@@ -420,7 +428,13 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
                 
                 # Success: add a small mandatory cooldown to prevent burst limit
                 await asyncio.sleep(0.5)
-                return data
+                
+                if data and data.get("s") == "ok":
+                    pyth_data = data
+                    break
+                else:
+                    logger.warning(f"Pyth TV History API returned non-ok status: {data.get('s')} for {full_symbol}")
+                    break  # Treat non-ok status as failure, no need to retry
                 
         except httpx.HTTPStatusError as e:
             if e.response.status_code in [400, 404]:
@@ -439,8 +453,16 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
                 await asyncio.sleep(delay)
             else:
                 logger.error(f"Failed to query TV History for {full_symbol} after {max_retries} attempts: {e}")
-                
-    return None
+
+    if pyth_data:
+        return pyth_data
+
+    # Fallback to Yahoo if Pyth TV History failed/returned non-ok and this is a daily request for a Stock/ETF
+    if is_equity and ticker and resolution == "D":
+        logger.warning(f"Pyth TV History daily fetch failed or returned error for {full_symbol}. Falling back to Yahoo Finance daily...")
+        yahoo_data = await get_yahoo_history_raw(ticker, "1d", "30d")
+        if yahoo_data:
+            return yahoo_data
 
 async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
     """
