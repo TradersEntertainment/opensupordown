@@ -211,7 +211,7 @@ async def _check_auto_expire(positions):
                     logger.error(f"Error fetching historical open price for {symbol}: {ex}")
 
                 if not open_price:
-                    open_price = await pyth_client.get_latest_price(p['pyth_id'])
+                    open_price = await pyth_client.get_active_price(symbol, p['pyth_id'])
 
                 ref = p['ref_price']
                 is_win = False
@@ -237,7 +237,7 @@ async def _check_auto_expire(positions):
             if now_et.hour >= close_hour:
                 logger.info(f"Auto-closing position {p['id']} ({symbol})")
 
-                current_price = await pyth_client.get_latest_price(p['pyth_id'])
+                current_price = await pyth_client.get_active_price(symbol, p['pyth_id'])
                 ref = p['ref_price']
                 is_win = False
                 if current_price:
@@ -681,21 +681,18 @@ async def _check_premarket_movers():
     
     for symbol in PREMARKET_WATCHLIST:
         try:
-            # Try .PRE feed first, fallback to regular
             pre_symbol = f"Equity.US.{symbol}/USD.PRE"
             regular_symbol = f"Equity.US.{symbol}/USD"
             
-            # Check if PRE feed exists in cache
             pre_id = pyth_client.pyth_id_cache.get(pre_symbol)
             regular_id = pyth_client.pyth_id_cache.get(regular_symbol)
+            active_id = regular_id or pre_id
             
-            # Get current premarket price
-            current_price = None
-            if pre_id:
-                current_price = await pyth_client.get_latest_price(pre_id)
-            if not current_price and regular_id:
-                current_price = await pyth_client.get_latest_price(regular_id)
+            if not active_id:
+                continue
             
+            # Use get_active_price to benefit from Yahoo Finance real-time pre-market fallback for stocks
+            current_price = await pyth_client.get_active_price(symbol, active_id)
             if not current_price:
                 continue
             

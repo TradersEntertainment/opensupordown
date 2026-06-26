@@ -161,7 +161,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     lines = ["📊 <b>Aktif Pozisyonlar</b>\n"]
     for p in positions:
-        current_price = await pyth_client.get_latest_price(p['pyth_id'])
+        current_price = await pyth_client.get_active_price(p['symbol'], p['pyth_id'])
         if not current_price:
             lines.append(f"• {p['symbol']} {p['direction']} (Anlık fiyat alınamadı)")
             continue
