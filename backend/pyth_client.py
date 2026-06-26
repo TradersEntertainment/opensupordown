@@ -523,10 +523,19 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
     target_key = "c" if price_type == 'close' else "o"
     
     if data and data.get("s") == "ok" and target_key in data and len(data[target_key]) > 0:
-        price = data[target_key][-1]
-        res_price = float(price)
-        _historical_price_cache[cache_key] = res_price
-        return res_price
+        timestamps = data.get("t", [])
+        prices = data[target_key]
+        
+        valid_price = None
+        # Iterate backwards to find the latest candle that is <= to_ts (to exclude today's partial candle)
+        for i in range(len(timestamps) - 1, -1, -1):
+            if timestamps[i] <= to_ts:
+                valid_price = float(prices[i])
+                break
+                
+        if valid_price is not None:
+            _historical_price_cache[cache_key] = valid_price
+            return valid_price
     
     # Fallback to Hermes at the raw to_ts/from_ts
     logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Falling back to Hermes raw timestamp history API...")
