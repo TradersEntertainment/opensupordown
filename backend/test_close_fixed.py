@@ -23,11 +23,13 @@ def get_previous_close_times_fixed(symbol: str) -> tuple[int, int]:
     return int(from_dt.timestamp()), int(to_dt.timestamp())
 
 async def main():
+    await pyth_client.init_feeds_cache()
+    pyth_id, full_symbol = pyth_client.get_pyth_id("TSLA")
     from_ts, to_ts = get_previous_close_times_fixed("TSLA")
-    print(f"from_ts: {from_ts}, to_ts: {to_ts}")
+    print(f"pyth_id: {pyth_id}, from_ts: {from_ts}, to_ts: {to_ts}")
     price = await pyth_client.get_historical_candle_price(
-        full_symbol="Equity.US.TSLA/USD",
-        pyth_id="Equity.US.TSLA/USD",
+        full_symbol=full_symbol,
+        pyth_id=pyth_id,
         from_ts=from_ts,
         to_ts=to_ts,
         price_type="close"

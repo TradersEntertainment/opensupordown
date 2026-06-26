@@ -382,9 +382,25 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
 
     # Route stocks/ETFs directly to Yahoo if not requesting daily resolution
     if is_equity and ticker and resolution != "D":
-        interval = "1h" if resolution == "60" else "1d"
-        range_str = "90d" if interval == "1h" else "30d"
-        logger.info(f"Routing hourly/intraday history query for {full_symbol} to Yahoo Finance (ticker: {ticker})")
+        if resolution == "60":
+            interval = "1h"
+            range_str = "90d"
+        elif resolution == "1":
+            interval = "1m"
+            range_str = "7d"
+        elif resolution == "5":
+            interval = "5m"
+            range_str = "30d"
+        elif resolution == "15":
+            interval = "15m"
+            range_str = "30d"
+        elif resolution == "30":
+            interval = "30m"
+            range_str = "30d"
+        else:
+            interval = "1d"
+            range_str = "30d"
+        logger.info(f"Routing {resolution}-minute/intraday history query for {full_symbol} to Yahoo Finance (ticker: {ticker}, interval: {interval})")
         yahoo_data = await get_yahoo_history_raw(ticker, interval, range_str)
         if yahoo_data:
             return yahoo_data

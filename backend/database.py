@@ -221,3 +221,83 @@ async def get_historical_cache(symbol: str) -> tuple:
             if row:
                 return json.loads(row[0]), row[1]
             return None, None
+
+async def recalculate_active_positions_ref_prices():
+    """
+    Recalculates reference prices for all active positions to align with the new 16:00:00 ET Hermes/Yahoo 5m close logic.
+    This ensures old positions created with daily candle prices are updated to exact closes.
+    """
+    import pyth_client
+    import telegram_bot
+    
+    active_positions = await get_active_positions()
+    if not active_positions:
+        logger.info("No active positions to recalculate.")
+        return
+        
+    logger.info(f"Checking reference prices for {len(active_positions)} active positions...")
+    
+    for p in active_positions:
+        try:
+            symbol = p['symbol']
+            pyth_id = p['pyth_id']
+            direction = p['direction']
+            old_ref = p['ref_price']
+            
+            # Resolve full symbol (e.g. Equity.US.AMZN/USD)
+            _, full_symbol = pyth_client.get_pyth_id(symbol)
+            if not full_symbol:
+                logger.warning(f"Could not resolve full symbol for {symbol}, skipping recalculation for position {p['id']}")
+                continue
+                
+            # Skip binary YES/NO target-price markets
+            clean_dir = direction.replace("OPEN_", "")
+            if clean_dir not in ('UP', 'DOWN'):
+                logger.info(f"Position {symbol} {direction} (ID: {p['id']}) is a target-price binary market, skipping reference price recalculation.")
+                continue
+                
+            # Determine price type: open or close
+            is_open_bet = direction.startswith("OPEN_")
+            is_poly_tracked = bool(p.get('asset_id'))
+            
+            effective_price_type = 'close'
+            if is_open_bet and not is_poly_tracked:
+                effective_price_type = 'open'
+                
+            # Calculate the time window
+            if effective_price_type == 'close':
+                from_ts, to_ts = pyth_client.get_previous_close_times(symbol)
+            else:
+                from_ts, to_ts = pyth_client.get_previous_open_times(symbol)
+                
+            new_ref = await pyth_client.get_historical_candle_price(
+                full_symbol, pyth_id, from_ts, to_ts, price_type=effective_price_type
+            )
+            
+            if new_ref is None:
+                logger.warning(f"Could not fetch new reference price for {symbol} (ID: {p['id']})")
+                continue
+                
+            if abs(new_ref - old_ref) > 1e-5:
+                logger.info(f"Updating position {symbol} {direction} (ID: {p['id']}): ref_price {old_ref} -> {new_ref}")
+                
+                async with aiosqlite.connect(DB_FILE) as db:
+                    await db.execute(
+                        "UPDATE positions SET ref_price = ?, ref_timestamp = ? WHERE id = ?",
+                        (new_ref, to_ts, p['id'])
+                    )
+                    await db.commit()
+                    
+                # Send notification
+                msg = (
+                    f"🔄 <b>Referans Fiyat Güncellendi</b>\n"
+                    f"Pozisyon: {symbol} {direction} (ID: {p['id']})\n"
+                    f"Eski Referans: ${old_ref:.4f}\n"
+                    f"Yeni Referans: ${new_ref:.4f}\n"
+                    f"({effective_price_type.upper()} fiyatı yeniden hesaplandı)"
+                )
+                await telegram_bot.send_notification(msg)
+                
+        except Exception as e:
+            logger.error(f"Error recalculating ref price for position {p.get('id')}: {e}")
+

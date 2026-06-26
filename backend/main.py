@@ -28,6 +28,13 @@ async def startup_event():
     await database.init_db()
     await pyth_client.init_feeds_cache()
     
+    # Recalculate reference prices for active positions to match corrected Pyth close logic
+    try:
+        await database.recalculate_active_positions_ref_prices()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to recalculate reference prices on startup: {e}")
+        
     # Start tracker loop
     tracker_engine.start_background_task()
     
