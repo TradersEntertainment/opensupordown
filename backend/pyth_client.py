@@ -466,8 +466,10 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
 
 async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: int, to_ts: int, price_type: str = 'close') -> float:
     """
-    Fetches the exact 'Close' or 'Open' price of the 1-minute candle from Pyth's TV history API.
-    Falls back to Hermes historical API if TV shim fails.
+    Fetches the exact 'Close' or 'Open' price of the candle.
+    For Stock/ETF symbols (starting with 'Equity.'), retrieves the exact price published by Pyth
+    at 16:00:00 ET (for close) or 9:30:00 ET (for open) via Hermes historical API.
+    Otherwise, falls back to Pyth's TV history API or Yahoo Finance.
     Uses in-memory cache to prevent 429 rate limiting.
     """
     cache_key = (full_symbol, from_ts, to_ts, price_type)
@@ -476,6 +478,45 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
         if cached_price is not None:
             return cached_price
 
+    is_equity = full_symbol.startswith("Equity.")
+    clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
+    
+    if is_equity and clean_id:
+        try:
+            # Convert to_ts to US/Eastern timezone to align with market hours
+            et_tz = pytz.timezone('US/Eastern')
+            dt_et = datetime.fromtimestamp(to_ts, et_tz)
+            
+            # Align target time to market close (16:00 ET) or open (9:30 ET)
+            if price_type == 'close':
+                target_dt = dt_et.replace(hour=16, minute=0, second=0, microsecond=0)
+            else:
+                target_dt = dt_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                
+            target_ts = int(target_dt.timestamp())
+            
+            logger.info(f"Fetching exact Hermes historical price for {full_symbol} at {target_dt} ({target_ts})")
+            url = f"{HERMES_URL}/updates/price/{target_ts}"
+            params = {"ids[]": clean_id, "parsed": "true"}
+            
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, params=params, timeout=10.0)
+                if resp.status_code == 200:
+                    fb_data = resp.json()
+                    for item in fb_data.get("parsed", []):
+                        if clean_id in item.get("id", ""):
+                            price_info = item.get("price", {})
+                            p_str = price_info.get("price")
+                            e_str = price_info.get("expo")
+                            if p_str and e_str:
+                                res_price = float(p_str) * (10 ** int(e_str))
+                                _historical_price_cache[cache_key] = res_price
+                                return res_price
+            logger.warning(f"No direct Hermes price found for {full_symbol} at {target_dt}. Falling back to TV History...")
+        except Exception as e:
+            logger.warning(f"Error fetching exact Hermes price for {full_symbol}: {e}. Falling back to TV History...")
+
+    # Fallback to TV History daily resolution
     data = await get_tv_history_raw(full_symbol, resolution="D", from_ts=from_ts, to_ts=to_ts)
     
     # TV API response: { "s": "ok", "t": [...], "c": [...], "o": [...] }
@@ -487,9 +528,8 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
         _historical_price_cache[cache_key] = res_price
         return res_price
     
-    # Fallback to Hermes
-    logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Falling back to Hermes history API...")
-    clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
+    # Fallback to Hermes at the raw to_ts/from_ts
+    logger.warning(f"No TV candle data found for {full_symbol} between {from_ts} and {to_ts}. Falling back to Hermes raw timestamp history API...")
     target_ts = to_ts if price_type == 'close' else from_ts
     fallback_url = f"{HERMES_URL}/updates/price/{target_ts}"
     fb_params = {"ids[]": clean_id, "parsed": "true"}
