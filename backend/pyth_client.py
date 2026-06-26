@@ -365,7 +365,7 @@ async def get_yahoo_history_raw(symbol: str, interval: str = "1h", range_str: st
         logger.warning(f"Failed to fetch Yahoo history for {symbol_up}: {e}")
     return None
 
-async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to_ts: int, max_retries: int = 5) -> dict:
+async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to_ts: int, max_retries: int = 5, direct_pyth: bool = False) -> dict:
     """
     Low-level helper to query Pyth's TV History API.
     Handles concurrency via semaphore, global rate limit backoff, and retries.
@@ -380,8 +380,8 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
         if len(parts) >= 3:
             ticker = parts[2].split("/")[0]
 
-    # Route stocks/ETFs directly to Yahoo if not requesting daily resolution
-    if is_equity and ticker and resolution != "D":
+    # Route stocks/ETFs directly to Yahoo if not requesting daily resolution and direct_pyth is False
+    if is_equity and ticker and resolution != "D" and not direct_pyth:
         if resolution == "60":
             interval = "1h"
             range_str = "90d"
@@ -474,7 +474,7 @@ async def get_tv_history_raw(full_symbol: str, resolution: str, from_ts: int, to
         return pyth_data
 
     # Fallback to Yahoo if Pyth TV History failed/returned non-ok and this is a daily request for a Stock/ETF
-    if is_equity and ticker and resolution == "D":
+    if is_equity and ticker and resolution == "D" and not direct_pyth:
         logger.warning(f"Pyth TV History daily fetch failed or returned error for {full_symbol}. Falling back to Yahoo Finance daily...")
         yahoo_data = await get_yahoo_history_raw(ticker, "1d", "30d")
         if yahoo_data:
@@ -497,58 +497,135 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
     is_equity = full_symbol.startswith("Equity.")
     clean_id = pyth_id if not pyth_id.startswith('0x') else pyth_id[2:]
     
-    if is_equity and clean_id:
+    if is_equity:
         try:
-            # Convert to_ts to US/Eastern timezone to align with market hours
             et_tz = pytz.timezone('US/Eastern')
             dt_et = datetime.fromtimestamp(to_ts, et_tz)
+            target_date = dt_et.date()
+            ticker = full_symbol.split(".")[2].split("/")[0] if len(full_symbol.split(".")) >= 3 else None
             
-            # Align target time to market close (16:00 ET) or open (9:30 ET)
-            if price_type == 'close':
-                target_dt = dt_et.replace(hour=16, minute=0, second=0, microsecond=0)
-            else:
-                target_dt = dt_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            if price_type == 'close' and ticker:
+                # 1. Fetch Yahoo daily close to use as reference
+                yahoo_close = None
+                try:
+                    yahoo_data = await get_yahoo_history_raw(ticker, "1d", "5d")
+                    if yahoo_data and yahoo_data.get("s") == "ok":
+                        y_times = yahoo_data.get("t", [])
+                        y_closes = yahoo_data.get("c", [])
+                        for idx, y_ts in enumerate(y_times):
+                            y_date = datetime.fromtimestamp(y_ts, et_tz).date()
+                            if y_date == target_date:
+                                yahoo_close = float(y_closes[idx])
+                                break
+                except Exception as e:
+                    logger.warning(f"Failed to fetch Yahoo daily close reference for {ticker}: {e}")
                 
-            target_ts = int(target_dt.timestamp())
-            
-            logger.info(f"Fetching exact Hermes historical price for {full_symbol} at {target_dt} ({target_ts})")
-            url = f"{HERMES_URL}/updates/price/{target_ts}"
-            params = {"ids[]": clean_id, "parsed": "true"}
-            
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, params=params, timeout=10.0)
-                if resp.status_code == 200:
-                    fb_data = resp.json()
-                    for item in fb_data.get("parsed", []):
-                        if clean_id in item.get("id", ""):
-                            price_info = item.get("price", {})
-                            p_str = price_info.get("price")
-                            e_str = price_info.get("expo")
-                            if p_str and e_str:
-                                res_price = float(p_str) * (10 ** int(e_str))
-                                _historical_price_cache[cache_key] = res_price
-                                return res_price
-                                
-            # If Hermes lookup fails (e.g. for EWY), try Yahoo Finance 5-minute bar close at 15:55 ET
-            # since it corresponds to the 16:00 ET close price before auction adjustments.
-            if price_type == 'close':
-                ticker = full_symbol.split(".")[2].split("/")[0]
-                logger.info(f"Hermes lookup failed for {full_symbol}. Trying Yahoo 5-minute bar close fallback for {ticker}...")
-                yahoo_5m = await get_yahoo_history_raw(ticker, interval="5m", range_str="5d")
-                if yahoo_5m and yahoo_5m.get("s") == "ok":
-                    bar_ts = target_ts - 300  # 15:55 ET bar
-                    timestamps = yahoo_5m.get("t", [])
-                    closes = yahoo_5m.get("c", [])
-                    if bar_ts in timestamps:
-                        idx = timestamps.index(bar_ts)
-                        res_price = float(closes[idx])
-                        logger.info(f"Found Yahoo 5-minute 15:55 ET close for {ticker}: {res_price}")
-                        _historical_price_cache[cache_key] = res_price
-                        return res_price
+                # Query 1-minute Pyth candles around 16:00:00 ET
+                target_dt = datetime.combine(target_date, datetime.min.time()).replace(hour=16, minute=0, second=0)
+                target_dt = et_tz.localize(target_dt)
+                target_ts = int(target_dt.timestamp())
+                
+                pyth_success = False
+                candidates = []
+                try:
+                    logger.info(f"Querying Pyth 1-minute candles for {full_symbol} close around {target_dt}")
+                    pyth_data = await get_tv_history_raw(
+                        full_symbol=full_symbol,
+                        resolution="1",
+                        from_ts=target_ts - 300,
+                        to_ts=target_ts + 300,
+                        direct_pyth=True
+                    )
+                    if pyth_data and pyth_data.get("s") == "ok":
+                        t_arr = pyth_data.get("t", [])
+                        o_arr = pyth_data.get("o", [])
+                        h_arr = pyth_data.get("h", [])
+                        l_arr = pyth_data.get("l", [])
+                        c_arr = pyth_data.get("c", [])
                         
-            logger.warning(f"No direct Hermes or Yahoo 5m price found for {full_symbol} at {target_dt}. Falling back to TV History...")
+                        t_1559 = target_ts - 60
+                        if t_1559 in t_arr:
+                            idx_1559 = t_arr.index(t_1559)
+                            candidates.append(float(c_arr[idx_1559]))
+                        if target_ts in t_arr:
+                            idx_1600 = t_arr.index(target_ts)
+                            candidates.append(float(o_arr[idx_1600]))
+                            candidates.append(float(h_arr[idx_1600]))
+                            candidates.append(float(l_arr[idx_1600]))
+                            candidates.append(float(c_arr[idx_1600]))
+                        
+                        if candidates:
+                            pyth_success = True
+                except Exception as e:
+                    logger.warning(f"Error querying Pyth 1-minute candles for {full_symbol}: {e}")
+                
+                # If Pyth 1-minute candidates are found, resolve the final price from them
+                if pyth_success and candidates:
+                    if yahoo_close is not None:
+                        selected_price = min(candidates, key=lambda x: abs(x - yahoo_close))
+                        logger.info(f"Resolved {full_symbol} close using Pyth 1-minute closest rule: {selected_price} (Yahoo reference: {yahoo_close})")
+                    else:
+                        selected_price = candidates[0]
+                        logger.warning(f"Resolved {full_symbol} close using Pyth 1-minute default (no Yahoo reference): {selected_price}")
+                    _historical_price_cache[cache_key] = selected_price
+                    return selected_price
+                
+                # 2. Try Pyth Daily TV history as a secondary Pyth fallback (if 1-minute candles failed or were rate-limited)
+                try:
+                    logger.warning(f"Pyth 1-minute candles unavailable for {full_symbol}. Trying Pyth daily TV history...")
+                    daily_data = await get_tv_history_raw(full_symbol, resolution="D", from_ts=from_ts, to_ts=to_ts, direct_pyth=True)
+                    if daily_data and daily_data.get("s") == "ok" and "c" in daily_data:
+                        d_times = daily_data.get("t", [])
+                        d_closes = daily_data.get("c", [])
+                        for idx, d_ts in enumerate(d_times):
+                            d_date = datetime.fromtimestamp(d_ts, et_tz).date()
+                            if d_date == target_date:
+                                res_val = float(d_closes[idx])
+                                logger.info(f"Resolved {full_symbol} close using Pyth daily TV close: {res_val}")
+                                _historical_price_cache[cache_key] = res_val
+                                return res_val
+                except Exception as e:
+                    logger.warning(f"Error querying Pyth daily TV history for {full_symbol}: {e}")
+                    
+                # 3. Yahoo 5-minute bar close fallback (as final fallback for completely unsupported assets like EWY)
+                try:
+                    logger.info(f"Pyth TV history failed for {full_symbol}. Trying Yahoo 5-minute bar close fallback for {ticker}...")
+                    yahoo_5m = await get_yahoo_history_raw(ticker, interval="5m", range_str="5d")
+                    if yahoo_5m and yahoo_5m.get("s") == "ok":
+                        bar_ts = target_ts - 300  # 15:55 ET bar
+                        timestamps = yahoo_5m.get("t", [])
+                        closes = yahoo_5m.get("c", [])
+                        if bar_ts in timestamps:
+                            idx = timestamps.index(bar_ts)
+                            res_price = float(closes[idx])
+                            logger.info(f"Resolved {full_symbol} close using Yahoo 5-minute bar close: {res_price}")
+                            _historical_price_cache[cache_key] = res_price
+                            return res_price
+                except Exception as e:
+                    logger.warning(f"Error querying Yahoo 5-minute bar close fallback for {ticker}: {e}")
+
+            elif price_type == 'open' and clean_id:
+                # Keep direct Hermes lookup for market open
+                target_dt = dt_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                target_ts = int(target_dt.timestamp())
+                logger.info(f"Fetching exact Hermes historical price for open of {full_symbol} at {target_dt}")
+                url = f"{HERMES_URL}/updates/price/{target_ts}"
+                params = {"ids[]": clean_id, "parsed": "true"}
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, params=params, timeout=10.0)
+                    if resp.status_code == 200:
+                        fb_data = resp.json()
+                        for item in fb_data.get("parsed", []):
+                            if clean_id in item.get("id", ""):
+                                price_info = item.get("price", {})
+                                p_str = price_info.get("price")
+                                e_str = price_info.get("expo")
+                                if p_str and e_str:
+                                    res_price = float(p_str) * (10 ** int(e_str))
+                                    _historical_price_cache[cache_key] = res_price
+                                    return res_price
         except Exception as e:
-            logger.warning(f"Error fetching exact Hermes/Yahoo 5m price for {full_symbol}: {e}. Falling back to TV History...")
+            logger.warning(f"Error resolving equity historical price for {full_symbol}: {e}")
 
     # Fallback to TV History daily resolution
     data = await get_tv_history_raw(full_symbol, resolution="D", from_ts=from_ts, to_ts=to_ts)
