@@ -512,9 +512,27 @@ async def get_historical_candle_price(full_symbol: str, pyth_id: str, from_ts: i
                                 res_price = float(p_str) * (10 ** int(e_str))
                                 _historical_price_cache[cache_key] = res_price
                                 return res_price
-            logger.warning(f"No direct Hermes price found for {full_symbol} at {target_dt}. Falling back to TV History...")
+                                
+            # If Hermes lookup fails (e.g. for EWY), try Yahoo Finance 5-minute bar close at 15:55 ET
+            # since it corresponds to the 16:00 ET close price before auction adjustments.
+            if price_type == 'close':
+                ticker = full_symbol.split(".")[2].split("/")[0]
+                logger.info(f"Hermes lookup failed for {full_symbol}. Trying Yahoo 5-minute bar close fallback for {ticker}...")
+                yahoo_5m = await get_yahoo_history_raw(ticker, interval="5m", range_str="5d")
+                if yahoo_5m and yahoo_5m.get("s") == "ok":
+                    bar_ts = target_ts - 300  # 15:55 ET bar
+                    timestamps = yahoo_5m.get("t", [])
+                    closes = yahoo_5m.get("c", [])
+                    if bar_ts in timestamps:
+                        idx = timestamps.index(bar_ts)
+                        res_price = float(closes[idx])
+                        logger.info(f"Found Yahoo 5-minute 15:55 ET close for {ticker}: {res_price}")
+                        _historical_price_cache[cache_key] = res_price
+                        return res_price
+                        
+            logger.warning(f"No direct Hermes or Yahoo 5m price found for {full_symbol} at {target_dt}. Falling back to TV History...")
         except Exception as e:
-            logger.warning(f"Error fetching exact Hermes price for {full_symbol}: {e}. Falling back to TV History...")
+            logger.warning(f"Error fetching exact Hermes/Yahoo 5m price for {full_symbol}: {e}. Falling back to TV History...")
 
     # Fallback to TV History daily resolution
     data = await get_tv_history_raw(full_symbol, resolution="D", from_ts=from_ts, to_ts=to_ts)
